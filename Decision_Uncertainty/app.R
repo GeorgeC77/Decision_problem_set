@@ -1,90 +1,255 @@
-# 依赖包：shiny, rhandsontable, DT, ggplot2
-# install.packages(c("shiny", "rhandsontable", "DT", "ggplot2", "tidyr"))
+# 依赖包：shiny, DT, rhandsontable, ggplot2
+# install.packages(c("shiny", "DT", "rhandsontable", "ggplot2"))
 
 library(shiny)
-library(rhandsontable)
 library(DT)
+library(rhandsontable)
 library(ggplot2)
-library(tidyr)
 
 # =========================
-# 教材第四章习题 7 默认收益矩阵（钟表公司设计方案）
-# 方案1：投资10万元，单位成本15元，售价25元，单位利润10元
-# 方案2：投资16万元，单位成本12元，售价25元，单位利润13元
-# 方案3：投资25万元，单位成本 8元，售价25元，单位利润17元
-# 需求量：3万、12万、20万只
-# =========================
-default_payoff <- matrix(
-  c(20, 110, 190,    # 方案1：3万*10-10万，12万*10-10万，20万*10-10万（单位：万元）
-    23, 140, 244,    # 方案2：3万*13-16万，12万*13-16万，20万*13-16万
-    26, 179, 315),   # 方案3：3万*17-25万，12万*17-25万，20万*17-25万
-  nrow = 3, byrow = TRUE
-)
-rownames(default_payoff) <- c("方案1", "方案2", "方案3")
-colnames(default_payoff) <- c("需求3万", "需求12万", "需求20万")
-
-# =========================
-# 工具函数
+# 核心计算函数
 # =========================
 
-# 不确定型决策核心计算
-calc_uncertainty_decision <- function(payoff, alpha, is_benefit) {
-  n_a <- nrow(payoff)
-  n_s <- ncol(payoff)
+calc_uncertainty_decision <- function(payoff_matrix, alpha = 0.5, is_benefit = TRUE) {
+  payoff_matrix <- as.matrix(payoff_matrix)
+
+  if (any(is.na(payoff_matrix))) {
+    stop("收益/成本矩阵存在缺失值，请检查输入。")
+  }
+  if (is.na(alpha) || length(alpha) != 1) {
+    stop("乐观系数 alpha 必须是一个 0~1 之间的单一数值。")
+  }
+  if (alpha < 0 || alpha > 1) {
+    stop("乐观系数 alpha 必须在 0 与 1 之间。alpha=1 表示完全乐观，alpha=0 表示完全悲观。")
+  }
+
+  n_a <- nrow(payoff_matrix)
+  action_names <- rownames(payoff_matrix)
+  if (is.null(action_names)) action_names <- paste0("方案", seq_len(n_a))
+  state_names <- colnames(payoff_matrix)
+  if (is.null(state_names)) state_names <- paste0("状态", seq_len(ncol(payoff_matrix)))
+
+  row_max <- apply(payoff_matrix, 1, max)
+  row_min <- apply(payoff_matrix, 1, min)
+  laplace <- rowMeans(payoff_matrix)
 
   if (is_benefit) {
-    maximax <- apply(payoff, 1, max)
-    maximin <- apply(payoff, 1, min)
-    laplace <- rowMeans(payoff)
+    maximax_val <- max(row_max)
+    maximax_idx <- which(abs(row_max - maximax_val) < 1e-9)
 
-    best_each_state <- apply(payoff, 2, max)
+    maximin_val <- max(row_min)
+    maximin_idx <- which(abs(row_min - maximin_val) < 1e-9)
+
+    hurwicz <- alpha * row_max + (1 - alpha) * row_min
+    hurwicz_val <- max(hurwicz)
+    hurwicz_idx <- which(abs(hurwicz - hurwicz_val) < 1e-9)
+
     regret <- sweep(
-      matrix(best_each_state, nrow = n_a, ncol = n_s, byrow = TRUE),
-      1:2, payoff, "-"
+      matrix(apply(payoff_matrix, 2, max), nrow = n_a, ncol = ncol(payoff_matrix), byrow = TRUE),
+      1:2, payoff_matrix, "-"
     )
+    row_max_regret <- apply(regret, 1, max)
+    savage_val <- min(row_max_regret)
+    savage_idx <- which(abs(row_max_regret - savage_val) < 1e-9)
 
-    hurwicz <- alpha * apply(payoff, 1, max) + (1 - alpha) * apply(payoff, 1, min)
+    laplace_val <- max(laplace)
+    laplace_idx <- which(abs(laplace - laplace_val) < 1e-9)
 
-    result_df <- data.frame(
-      决策方案 = rownames(payoff),
-      Maximax_乐观 = round(maximax, 4),
-      Maximin_悲观 = round(maximin, 4),
-      Laplace_等可能 = round(laplace, 4),
-      MinimaxRegret_最小最大后悔 = round(apply(regret, 1, max), 4),
-      Hurwicz_折中 = round(hurwicz, 4),
-      check.names = FALSE
+    summary <- data.frame(
+      决策准则 = c("Maximax（乐观）", "Maximin（悲观）", "Laplace（等可能）",
+                  "Hurwicz（折中）", "Savage（最小最大后悔值）"),
+      指标值 = c(maximax_val, maximin_val, laplace_val, hurwicz_val, savage_val),
+      推荐方案 = c(
+        paste(action_names[maximax_idx], collapse = ", "),
+        paste(action_names[maximin_idx], collapse = ", "),
+        paste(action_names[laplace_idx], collapse = ", "),
+        paste(action_names[hurwicz_idx], collapse = ", "),
+        paste(action_names[savage_idx], collapse = ", ")
+      ),
+      stringsAsFactors = FALSE
     )
   } else {
-    minimin <- apply(payoff, 1, min)
-    minimax_cost <- apply(payoff, 1, max)
-    laplace <- rowMeans(payoff)
+    minimin_val <- min(row_min)
+    minimin_idx <- which(abs(row_min - minimin_val) < 1e-9)
 
-    best_each_state <- apply(payoff, 2, min)
-    regret <- sweep(payoff, 2, best_each_state, "-")
+    minimax_cost_val <- min(row_max)
+    minimax_cost_idx <- which(abs(row_max - minimax_cost_val) < 1e-9)
 
-    hurwicz <- alpha * apply(payoff, 1, min) + (1 - alpha) * apply(payoff, 1, max)
+    laplace_val <- min(laplace)
+    laplace_idx <- which(abs(laplace - laplace_val) < 1e-9)
 
-    result_df <- data.frame(
-      决策方案 = rownames(payoff),
-      Minimin_乐观 = round(minimin, 4),
-      Minimax_悲观 = round(minimax_cost, 4),
-      Laplace_等可能 = round(laplace, 4),
-      MinimaxRegret_最小最大后悔 = round(apply(regret, 1, max), 4),
-      Hurwicz_折中 = round(hurwicz, 4),
-      check.names = FALSE
+    hurwicz <- alpha * row_min + (1 - alpha) * row_max
+    hurwicz_val <- min(hurwicz)
+    hurwicz_idx <- which(abs(hurwicz - hurwicz_val) < 1e-9)
+
+    regret <- sweep(payoff_matrix, 2, apply(payoff_matrix, 2, min), "-")
+    row_max_regret <- apply(regret, 1, max)
+    savage_val <- min(row_max_regret)
+    savage_idx <- which(abs(row_max_regret - savage_val) < 1e-9)
+
+    summary <- data.frame(
+      决策准则 = c("Minimin（乐观）", "Minimax（悲观）", "Laplace（等可能）",
+                  "Hurwicz（折中）", "Savage（最小最大后悔值）"),
+      指标值 = c(minimin_val, minimax_cost_val, laplace_val, hurwicz_val, savage_val),
+      推荐方案 = c(
+        paste(action_names[minimin_idx], collapse = ", "),
+        paste(action_names[minimax_cost_idx], collapse = ", "),
+        paste(action_names[laplace_idx], collapse = ", "),
+        paste(action_names[hurwicz_idx], collapse = ", "),
+        paste(action_names[savage_idx], collapse = ", ")
+      ),
+      stringsAsFactors = FALSE
     )
   }
 
-  rownames(regret) <- rownames(payoff)
-  colnames(regret) <- colnames(payoff)
-
   list(
-    result_df = result_df,
+    payoff = payoff_matrix,
+    alpha = alpha,
+    is_benefit = is_benefit,
+    action_names = action_names,
+    state_names = state_names,
+    maximax = if (is_benefit) row_max else NULL,
+    minimin = if (!is_benefit) row_min else NULL,
+    maximin = if (is_benefit) row_min else NULL,
+    minimax_cost = if (!is_benefit) row_max else NULL,
+    laplace = laplace,
+    hurwicz = hurwicz,
     regret = regret,
-    best_each_state = best_each_state,
-    is_benefit = is_benefit
+    row_max_regret = row_max_regret,
+    summary = summary
   )
 }
+
+# =========================
+# 教师自测
+# =========================
+
+run_uncertainty_self_tests <- function() {
+  tests <- list()
+
+  payoff_b <- matrix(c(800, 400, -200, 600, 300, 100, 200, 150, 300),
+                     nrow = 3, byrow = TRUE,
+                     dimnames = list(c("大批量", "中批量", "小批量"),
+                                     c("畅销", "一般", "滞销")))
+  alpha <- 0.7
+  res_b <- calc_uncertainty_decision(payoff_b, alpha, TRUE)
+
+  # 收益型手工核对
+  row_max <- apply(payoff_b, 1, max)
+  row_min <- apply(payoff_b, 1, min)
+  laplace_b <- rowMeans(payoff_b)
+  hurwicz_b <- alpha * row_max + (1 - alpha) * row_min
+  regret_b <- sweep(matrix(apply(payoff_b, 2, max), nrow = 3, ncol = 3, byrow = TRUE), 1:2, payoff_b, "-")
+  max_regret_b <- apply(regret_b, 1, max)
+
+  passed_b <- all(abs(res_b$maximax - row_max) < 1e-6) &&
+    all(abs(res_b$maximin - row_min) < 1e-6) &&
+    all(abs(res_b$laplace - laplace_b) < 1e-6) &&
+    all(abs(res_b$hurwicz - hurwicz_b) < 1e-6) &&
+    all(abs(res_b$row_max_regret - max_regret_b) < 1e-6) &&
+    res_b$summary$推荐方案[res_b$summary$决策准则 == "Maximax（乐观）"] == "大批量"
+
+  tests[[length(tests) + 1]] <- list(
+    测试名称 = "收益型准则方向",
+    实际输出 = paste(res_b$summary$决策准则, res_b$summary$推荐方案, sep = ":", collapse = "； "),
+    标准答案 = "Maximax应选大批量，Maximin应选小批量，Savage应选中批量",
+    是否通过 = passed_b,
+    失败提示 = if (passed_b) "" else "收益型 Maximax 取行最大最大，Maximin 取行最小最大，Savage 取最小最大后悔值。"
+  )
+
+  # Hurwicz alpha=1 vs alpha=0
+  res_opt <- calc_uncertainty_decision(payoff_b, 1, TRUE)
+  res_pes <- calc_uncertainty_decision(payoff_b, 0, TRUE)
+  passed_hurwicz <- res_opt$summary$推荐方案[res_opt$summary$决策准则 == "Hurwicz（折中）"] == "大批量" &&
+    res_pes$summary$推荐方案[res_pes$summary$决策准则 == "Hurwicz（折中）"] == "小批量"
+  tests[[length(tests) + 1]] <- list(
+    测试名称 = "Hurwicz 乐观系数边界",
+    实际输出 = paste0("alpha=1: ", res_opt$summary$推荐方案[res_opt$summary$决策准则 == "Hurwicz（折中）"],
+                    "； alpha=0: ", res_pes$summary$推荐方案[res_pes$summary$决策准则 == "Hurwicz（折中）"]),
+    标准答案 = "alpha=1: 大批量； alpha=0: 小批量",
+    是否通过 = passed_hurwicz,
+    失败提示 = if (passed_hurwicz) "" else "Hurwicz 中 alpha=1 应退化为乐观准则，alpha=0 应退化为悲观准则。"
+  )
+
+  # 成本型
+  payoff_c <- -payoff_b
+  res_c <- calc_uncertainty_decision(payoff_c, alpha, FALSE)
+  row_min_c <- apply(payoff_c, 1, min)
+  row_max_c <- apply(payoff_c, 1, max)
+  laplace_c <- rowMeans(payoff_c)
+  hurwicz_c <- alpha * row_min_c + (1 - alpha) * row_max_c
+  regret_c <- sweep(payoff_c, 2, apply(payoff_c, 2, min), "-")
+  max_regret_c <- apply(regret_c, 1, max)
+
+  passed_c <- all(abs(res_c$minimin - row_min_c) < 1e-6) &&
+    all(abs(res_c$minimax_cost - row_max_c) < 1e-6) &&
+    all(abs(res_c$laplace - laplace_c) < 1e-6) &&
+    all(abs(res_c$hurwicz - hurwicz_c) < 1e-6) &&
+    all(abs(res_c$row_max_regret - max_regret_c) < 1e-6)
+  tests[[length(tests) + 1]] <- list(
+    测试名称 = "成本型准则方向",
+    实际输出 = paste(res_c$summary$决策准则, res_c$summary$推荐方案, sep = ":", collapse = "； "),
+    标准答案 = "成本型 Minimin 取行最小最小，Minimax 取行最大最小",
+    是否通过 = passed_c,
+    失败提示 = if (passed_c) "" else "成本型 Minimin 取行最小最小，Minimax（成本）取行最大最小，不要与收益型混淆。"
+  )
+
+  # Savage regret 非负且行和？这里不检查行和
+  tests[[length(tests) + 1]] <- list(
+    测试名称 = "Savage 后悔值非负",
+    实际输出 = paste0("收益型最小后悔值=", min(res_b$row_max_regret),
+                    "；成本型最小后悔值=", min(res_c$row_max_regret)),
+    标准答案 = "均 >= 0",
+    是否通过 = all(res_b$regret >= -1e-9) && all(res_c$regret >= -1e-9),
+    失败提示 = if (all(res_b$regret >= -1e-9) && all(res_c$regret >= -1e-9)) "" else "后悔值不应为负，收益型后悔值=列最大-元素，成本型后悔值=元素-列最小。"
+  )
+
+  # 并列最优
+  tie_mat <- matrix(c(10, 10, 10, 10), nrow = 2, byrow = TRUE,
+                    dimnames = list(c("A", "B"), c("s1", "s2")))
+  res_tie <- calc_uncertainty_decision(tie_mat, 0.5, TRUE)
+  tie_ok <- grepl("A", res_tie$summary$推荐方案[1]) && grepl("B", res_tie$summary$推荐方案[1])
+  tests[[length(tests) + 1]] <- list(
+    测试名称 = "并列最优显示",
+    实际输出 = res_tie$summary$推荐方案[1],
+    标准答案 = "A, B",
+    是否通过 = tie_ok,
+    失败提示 = if (tie_ok) "" else "并列最优时应同时显示所有推荐方案。"
+  )
+
+  # 错误输入
+  err_cases <- list(
+    list(name = "alpha 超出 [0,1]", f = function() calc_uncertainty_decision(payoff_b, 1.2, TRUE),
+         hint = "alpha 应在 0~1 之间，越界时报错。"),
+    list(name = "payoff 含 NA", f = function() calc_uncertainty_decision(matrix(c(10, NA, 5, 6), nrow = 2, byrow = TRUE), 0.5, TRUE),
+         hint = "应检测到缺失值并报错。")
+  )
+  for (case in err_cases) {
+    passed <- tryCatch({ case$f(); FALSE }, error = function(e) TRUE)
+    tests[[length(tests) + 1]] <- list(
+      测试名称 = paste0("错误输入：", case$name),
+      实际输出 = if (passed) "正确报错" else "未报错",
+      标准答案 = "正确报错",
+      是否通过 = passed,
+      失败提示 = if (passed) "" else case$hint
+    )
+  }
+
+  do.call(rbind, lapply(tests, as.data.frame, stringsAsFactors = FALSE))
+}
+
+# =========================
+# 默认数据
+# =========================
+default_action_names <- c("大批量", "中批量", "小批量")
+default_state_names <- c("畅销", "一般", "滞销")
+default_payoff <- matrix(
+  c(800, 400, -200,
+    600, 300, 100,
+    200, 150, 300),
+  nrow = 3, byrow = TRUE,
+  dimnames = list(default_action_names, default_state_names)
+)
 
 # =========================
 # UI
@@ -104,19 +269,25 @@ ui <- fluidPage(
         padding: 16px 18px; margin-bottom: 14px;
         box-shadow: 0 2px 6px rgba(0,0,0,0.04);
       }
+      .metric-card {
+        background: white; border: 1px solid #d9e2ec; border-radius: 12px;
+        padding: 14px 16px; margin-bottom: 12px;
+        box-shadow: 0 2px 6px rgba(0,0,0,0.04);
+        min-height: 100px;
+      }
+      .metric-title { color: #5b7083; font-size: 13px; margin-bottom: 8px; }
+      .metric-value { font-size: 22px; font-weight: 700; color: #1f3b5b; }
       .formula-box {
         background: #f8fafc; border: 1px solid #d9e2ec;
         border-radius: 10px; padding: 14px 16px; line-height: 1.8;
       }
-      .warning-box {
-        background: #fff3cd; border: 1px solid #f0d98c; border-radius: 8px;
-        padding: 12px 16px; margin-bottom: 14px; color: #7a4b00;
-      }
       .small-note { color: #667085; font-size: 13px; }
+      .pass { color: #1b7f3b; font-weight: bold; }
+      .fail { color: #b42318; font-weight: bold; }
     "))
   ),
 
-  titlePanel(div(class = "title-main", "不确定型决策分析教学网页：乐观、悲观、Hurwicz、Laplace 与 Savage 准则")),
+  titlePanel(div(class = "title-main", "不确定型决策分析教学网页：乐观、悲观与后悔值")),
 
   div(
     class = "copyright-box",
@@ -134,34 +305,36 @@ ui <- fluidPage(
       width = 3,
       h4("问题类型"),
       radioButtons("problem_type", "收益型 / 成本型",
-                   choices = c("收益型（收益越大越好）" = "benefit",
-                               "成本型（成本越小越好）" = "cost"),
+                   choices = c("收益型" = "benefit", "成本型" = "cost"),
                    selected = "benefit"),
-      helpText("收益型问题选“收益型”，成本型问题选“成本型”。各决策准则的方向会随之改变。"),
-      tags$hr(),
+      helpText("收益型追求收益越大越好；成本型追求成本越低越好。后悔值方向会随之改变。"),
 
+      tags$hr(),
       h4("矩阵维度"),
-      numericInput("n_decisions", "决策方案数量", value = 3, min = 1, max = 20),
-      numericInput("n_states", "自然状态数量", value = 3, min = 1, max = 20),
+      numericInput("n_actions", "方案数量", value = 3, min = 2, max = 20),
+      numericInput("n_states", "自然状态数量", value = 3, min = 2, max = 20),
       actionButton("generate", "生成/重置矩阵", class = "btn-primary"),
       actionButton("reset_default", "恢复教材默认值", class = "btn-warning"),
-      tags$hr(),
 
-      h4("不确定型准则参数"),
-      sliderInput("alpha", "Hurwicz 乐观系数 α", min = 0, max = 1, value = 0.5, step = 0.01),
-      helpText("α 越接近 1 越乐观，越接近 0 越悲观。收益型：α×最好收益 + (1-α)×最差收益；成本型：α×最小成本 + (1-α)×最大成本。"),
       tags$hr(),
+      h4("Hurwicz 乐观系数"),
+      sliderInput("alpha", "alpha（0=完全悲观，1=完全乐观）",
+                  min = 0, max = 1, value = 0.7, step = 0.05),
+      helpText("alpha 越大越乐观。收益型 Hurwicz = alpha×最大收益 + (1-alpha)×最小收益；成本型 Hurwicz = alpha×最小成本 + (1-alpha)×最大成本。"),
 
+      tags$hr(),
+      h4("操作"),
       actionButton("calculate", "计算决策结果", class = "btn-success"),
       tags$hr(),
 
+      checkboxInput("teacher_mode", "显示教师自测区域", value = FALSE),
+
+      tags$hr(),
       helpText("输入说明："),
       tags$ul(
-        tags$li("先输入矩阵维度，再点击“生成/重置收益矩阵”"),
-        tags$li("可像 Excel 一样直接在表格中填写"),
-        tags$li("支持复制粘贴、Tab 键切换、方向键移动"),
-        tags$li("收益/成本矩阵：行=方案，列=自然状态"),
-        tags$li("不确定型决策不输入概率；若需要风险型分析，请使用“风险型决策”教学网页。")
+        tags$li("收益/成本矩阵：行=方案，列=自然状态，不需要输入概率。"),
+        tags$li("可直接在表格中编辑。"),
+        tags$li("所有准则同时计算，方便比较不同决策者的风险偏好。")
       )
     ),
 
@@ -173,65 +346,53 @@ ui <- fluidPage(
           br(),
           div(
             class = "info-box",
-            h4("教学目标"),
-            tags$p("本章对应教材第四章“不确定型决策分析”。通过本网页，学生可以："),
+            h4("问题背景"),
+            p("不确定型决策是指决策者不知道各自然状态出现的概率，只能依靠方案在不同状态下的结果选择。常用的准则有："),
             tags$ul(
-              tags$li("理解 Maximax、Maximin、Laplace、Minimax Regret、Hurwicz 等不确定型决策准则；"),
-              tags$li("比较不同准则下推荐方案可能不同，体会决策者的风险偏好对方案选择的影响；"),
-              tags$li("区分收益型与成本型问题在准则计算和后悔值方向上的差异；"),
-              tags$li("通过图形直观比较各方案在不同准则下的表现。")
-            ),
-            tags$details(
-              tags$summary("查看计算说明"),
-              br(),
-              tags$ul(
-                tags$li("收益型：Maximax（乐观）= 各行最大值再取最大；Maximin（悲观）= 各行最小值再取最大；Laplace = 行平均；Hurwicz = α×行最大 + (1-α)×行最小；Minimax Regret = 先按列求后悔值，再取各行最大后悔值中的最小。"),
-                tags$li("成本型：Minimin（乐观）= 各行最小值再取最小；Minimax（悲观）= 各行最大值再取最小；Laplace = 行平均；Hurwicz = α×行最小 + (1-α)×行最大；Minimax Regret 同样按列求后悔值。"),
-                tags$li("Laplace 准则是“等可能”假设，即认为各自然状态发生的机会相同，并不代表已知概率。"),
-                tags$li("Savage 准则又称最小最大后悔准则，后悔值是在每个自然状态下“选错方案”所造成的损失。")
-              )
+              tags$li(tags$b("Maximax（乐观）/ Minimin（成本型乐观）"), "：假设出现最好状态，选该状态下结果最好的方案。"),
+              tags$li(tags$b("Maximin（收益型悲观）/ Minimax（成本型悲观）"), "：假设出现最差状态，选该状态下结果最好的方案（或成本最小）。"),
+              tags$li(tags$b("Laplace（等可能）"), "：假设各状态概率相等，选择期望指标最优的方案。"),
+              tags$li(tags$b("Hurwicz（折中）"), "：用乐观系数 alpha 对最好与最坏结果加权。"),
+              tags$li(tags$b("Savage（最小最大后悔值）"), "：构造后悔值矩阵，选择最大后悔值最小的方案。")
             ),
             tags$hr(),
-            h4("默认案例：教材第四章习题 7"),
-            tags$p("某钟表公司计划通过销售网推销一种低价钟表，计划零售价每块25元。有三种设计方案："),
+            h4("核心教学目标"),
             tags$ul(
-              tags$li("方案1：一次性投资10万元，投产后每块成本15元；"),
-              tags$li("方案2：一次性投资16万元，投产后每块成本12元；"),
-              tags$li("方案3：一次性投资25万元，投产后每块成本 8元。")
-            ),
-            tags$p("该钟表需求量不确切，估计有三种可能：3万、12万、20万只。请建立收益矩阵，并分别用乐观法、悲观法、等概率法、后悔值法决定应采用哪个设计方案。"),
-            tags$hr(),
-            h4("重要提示"),
-            div(class = "warning-box",
-                tags$p("不同决策准则可能给出不同推荐方案，这不是计算错误，而是反映了决策者风险偏好不同：乐观者偏好 Maximax/Minimin，稳健者偏好 Maximin/Minimax 或 Minimax Regret，等概率者采用 Laplace。"))
+              tags$li("区分收益型与成本型各准则的优化方向，避免方向错误；"),
+              tags$li("理解 Hurwicz 乐观系数 alpha 的含义与边界行为；"),
+              tags$li("正确构造后悔值矩阵并应用 Savage 准则；"),
+              tags$li("识别并列最优，避免只返回单个方案造成误导。")
+            )
           )
         ),
 
         tabPanel(
-          "收益矩阵输入",
+          "输入数据",
           br(),
           div(
             class = "info-box",
-            h4("收益/成本矩阵"),
-            helpText("行表示决策方案，列表示自然状态。收益型问题填入收益，成本型问题填入成本。"),
+            h4("收益/成本矩阵（万元）"),
+            helpText("行=方案，列=自然状态。收益型填收益，成本型填成本。"),
             rHandsontableOutput("payoff_hot")
           )
         ),
 
         tabPanel(
-          "决策结果",
+          "计算结果",
           br(),
-          uiOutput("problem_note"),
-          DTOutput("result_table"),
+          div(
+            class = "info-box",
+            h4("各准则决策结果"),
+            DTOutput("summary_table")
+          ),
+          div(
+            class = "info-box",
+            h4("后悔值矩阵"),
+            helpText("收益型：后悔值 = 该状态下最大收益 - 所选方案收益；成本型：后悔值 = 所选方案成本 - 该状态下最小成本。"),
+            DTOutput("regret_table")
+          ),
           br(),
-          uiOutput("best_summary")
-        ),
-
-        tabPanel(
-          "后悔矩阵",
-          br(),
-          uiOutput("regret_note"),
-          DTOutput("regret_table")
+          uiOutput("explain_box")
         ),
 
         tabPanel(
@@ -239,14 +400,26 @@ ui <- fluidPage(
           br(),
           div(
             class = "info-box",
-            h4("各方案在不同准则下的评价值"),
-            plotOutput("criteria_plot", height = "420px"),
-            tags$p(class = "small-note", "注：Minimax Regret 为越小越好，其余收益型准则为越大越好；成本型准则方向相反。")
+            h4("各方案行最大/最小值对比"),
+            plotOutput("range_plot", height = "360px"),
+            tags$p(class = "small-note", "左端点为各方案最差结果，右端点为最好结果。红色竖线表示当前 alpha 下 Hurwicz 折中值。")
+          )
+        ),
+
+        tabPanel(
+          "教师自测",
+          br(),
+          conditionalPanel(
+            condition = "input.teacher_mode == true",
+            div(class = "info-box",
+                h4("教师自测"),
+                actionButton("run_self_test", "运行自测", class = "btn-info"),
+                br(), br(),
+                DTOutput("self_test_table"))
           ),
-          div(
-            class = "info-box",
-            h4("各方案收益/成本分布"),
-            plotOutput("payoff_plot", height = "360px")
+          conditionalPanel(
+            condition = "input.teacher_mode == false",
+            div(class = "info-box", p("请在左侧勾选“显示教师自测区域”后运行自测。"))
           )
         )
       )
@@ -254,37 +427,46 @@ ui <- fluidPage(
   )
 )
 
+# =========================
+# Server
+# =========================
 server <- function(input, output, session) {
-
-  create_matrix_df <- function(n_decisions, n_states, default_value = 0) {
-    df <- as.data.frame(matrix(default_value, nrow = n_decisions, ncol = n_states))
-    colnames(df) <- paste0("状态", seq_len(n_states))
-    rownames(df) <- paste0("决策", seq_len(n_decisions))
-    df
-  }
 
   rv <- reactiveValues(
     payoff_df = as.data.frame(default_payoff),
-    result = NULL
+    action_names = default_action_names,
+    state_names = default_state_names
   )
 
+  observe({
+    colnames(rv$payoff_df) <- rv$state_names
+    rownames(rv$payoff_df) <- rv$action_names
+  })
+
   observeEvent(input$generate, {
-    rv$payoff_df <- create_matrix_df(input$n_decisions, input$n_states)
-    rv$result <- NULL
+    n_a <- input$n_actions
+    n_s <- input$n_states
+    rv$action_names <- paste0("方案", seq_len(n_a))
+    rv$state_names <- paste0("状态", seq_len(n_s))
+    rv$payoff_df <- as.data.frame(matrix(0, nrow = n_a, ncol = n_s))
+    colnames(rv$payoff_df) <- rv$state_names
+    rownames(rv$payoff_df) <- rv$action_names
   })
 
   observeEvent(input$reset_default, {
+    rv$action_names <- default_action_names
+    rv$state_names <- default_state_names
     rv$payoff_df <- as.data.frame(default_payoff)
-    updateNumericInput(session, "n_decisions", value = 3)
-    updateNumericInput(session, "n_states", value = 3)
-    updateSliderInput(session, "alpha", value = 0.5)
+    colnames(rv$payoff_df) <- rv$state_names
+    rownames(rv$payoff_df) <- rv$action_names
     updateRadioButtons(session, "problem_type", selected = "benefit")
-    rv$result <- NULL
+    updateNumericInput(session, "n_actions", value = 3)
+    updateNumericInput(session, "n_states", value = 3)
+    updateSliderInput(session, "alpha", value = 0.7)
   })
 
   output$payoff_hot <- renderRHandsontable({
     req(rv$payoff_df)
-
     rhandsontable(
       rv$payoff_df,
       rowHeaders = rownames(rv$payoff_df),
@@ -292,185 +474,109 @@ server <- function(input, output, session) {
       height = 320,
       contextMenu = TRUE
     ) %>%
-      hot_table(manualColumnResize = TRUE, manualRowResize = TRUE) %>%
+      hot_table(manualColumnResize = TRUE) %>%
+      hot_cols(type = "numeric", format = "0") %>%
       hot_cols(renderer = "
         function (instance, td, row, col, prop, value, cellProperties) {
           Handsontable.renderers.NumericRenderer.apply(this, arguments);
           td.style.textAlign = 'center';
-          td.style.verticalAlign = 'middle';
         }
-      ") %>%
-      hot_col(col = colnames(rv$payoff_df), type = "numeric", format = "0")
+      ")
   })
 
-  observeEvent(input$calculate, {
+  calc <- eventReactive(input$calculate, {
     tbl <- hot_to_r(input$payoff_hot)
-
     if (is.null(tbl)) {
-      showNotification("请先生成并填写收益/成本矩阵。", type = "error")
-      return()
+      showNotification("请先生成并填写矩阵。", type = "error")
+      return(NULL)
     }
-
-    tbl <- as.data.frame(tbl)
-    rownames(tbl) <- rownames(rv$payoff_df)
-
-    for (j in seq_along(tbl)) {
-      tbl[[j]] <- suppressWarnings(as.numeric(tbl[[j]]))
-    }
-
-    rv$payoff_df <- tbl
-    payoff <- as.matrix(tbl)
-
-    if (any(is.na(payoff))) {
-      showNotification("请先将收益/成本矩阵填写完整。", type = "error")
-      return()
-    }
-
-    if (any(!is.finite(payoff))) {
-      showNotification("收益/成本矩阵存在非有限数值，请检查。", type = "error")
-      return()
-    }
-
+    payoff <- suppressWarnings(as.matrix(tbl))
+    rownames(payoff) <- rv$action_names
+    colnames(payoff) <- rv$state_names
     is_benefit <- input$problem_type == "benefit"
     alpha <- input$alpha
-    if (is.na(alpha) || alpha < 0 || alpha > 1) {
-      showNotification("Hurwicz 系数 α 必须在 0 到 1 之间。", type = "error")
-      return()
-    }
-
-    rv$result <- calc_uncertainty_decision(payoff, alpha, is_benefit)
+    tryCatch({
+      calc_uncertainty_decision(payoff, alpha, is_benefit)
+    }, error = function(e) {
+      showNotification(conditionMessage(e), type = "error")
+      NULL
+    })
   })
 
-  output$problem_note <- renderUI({
-    req(rv$result)
-    if (rv$result$is_benefit) {
-      div(class = "info-box",
-          p(strong("当前为收益型问题。"), "各准则目标为收益最大化：Maximax、Maximin、Laplace、Hurwicz 越大越好；Minimax Regret 越小越好。"))
-    } else {
-      div(class = "info-box",
-          p(strong("当前为成本型问题。"), "各准则目标为成本最小化：Minimin（乐观）= 各方案最小成本中的最小值，Minimax（悲观）= 各方案最大成本中的最小值；Laplace、Hurwicz 越小越好；Minimax Regret 越小越好。"))
-    }
-  })
-
-  output$result_table <- renderDT({
-    req(rv$result)
-    datatable(
-      rv$result$result_df,
-      rownames = FALSE,
-      options = list(dom = "t", paging = FALSE, ordering = FALSE),
-      caption = if (rv$result$is_benefit) "不确定型决策准则结果（收益型）" else "不确定型决策准则结果（成本型）"
-    )
-  })
-
-  output$best_summary <- renderUI({
-    req(rv$result)
-    df <- rv$result$result_df
-    is_benefit <- rv$result$is_benefit
-
-    pick_best <- function(values, maximize) {
-      idx <- if (maximize) which(abs(values - max(values)) < 1e-9) else which(abs(values - min(values)) < 1e-9)
-      paste(df$决策方案[idx], collapse = ", ")
-    }
-
-    if (is_benefit) {
-      best_maximax <- pick_best(df$Maximax_乐观, TRUE)
-      best_maximin <- pick_best(df$Maximin_悲观, TRUE)
-      best_laplace <- pick_best(df$Laplace_等可能, TRUE)
-      best_hurwicz <- pick_best(df$Hurwicz_折中, TRUE)
-    } else {
-      best_maximax <- pick_best(df$Minimin_乐观, FALSE)
-      best_maximin <- pick_best(df$Minimax_悲观, FALSE)
-      best_laplace <- pick_best(df$Laplace_等可能, FALSE)
-      best_hurwicz <- pick_best(df$Hurwicz_折中, FALSE)
-    }
-    best_minimax_regret <- pick_best(df$MinimaxRegret_最小最大后悔, FALSE)
-
-    maximax_label <- if (is_benefit) "Maximax（乐观准则）" else "Minimin（乐观准则）"
-    maximin_label <- if (is_benefit) "Maximin（悲观准则）" else "Minimax（悲观准则）"
-
-    div(
-      class = "info-box",
-      h4("推荐方案汇总"),
-      tags$ul(
-        tags$li(sprintf("%s推荐：%s", maximax_label, best_maximax)),
-        tags$li(sprintf("%s推荐：%s", maximin_label, best_maximin)),
-        tags$li(sprintf("Laplace（等可能准则）推荐：%s", best_laplace)),
-        tags$li(sprintf("Minimax Regret（最小最大后悔准则）推荐：%s", best_minimax_regret)),
-        tags$li(sprintf("Hurwicz（折中准则，α=%.2f）推荐：%s", input$alpha, best_hurwicz))
-      ),
-      p("提示：不同准则可能推荐不同方案，这反映了决策者风险偏好的差异，并非计算错误。若某准则出现多个方案并列最优，上面会同时列出。")
-    )
-  })
-
-  output$regret_note <- renderUI({
-    req(rv$result)
-    if (rv$result$is_benefit) {
-      div(class = "info-box",
-          p("收益型后悔值：regret_ij = max_i x_ij - x_ij，表示选择方案 i 而实际状态 j 发生时，与最优方案之间的收益差距。"))
-    } else {
-      div(class = "info-box",
-          p("成本型后悔值：regret_ij = c_ij - min_i c_ij，表示选择方案 i 而实际状态 j 发生时，与最小成本方案之间的成本差距。"))
-    }
+  output$summary_table <- renderDT({
+    req(calc())
+    datatable(calc()$summary, rownames = FALSE,
+              options = list(dom = "t", paging = FALSE, ordering = FALSE),
+              caption = if (calc()$is_benefit) "收益型各准则决策结果" else "成本型各准则决策结果") %>%
+      formatRound(columns = "指标值", digits = 4)
   })
 
   output$regret_table <- renderDT({
-    req(rv$result)
+    req(calc())
+    res <- calc()
+    df <- as.data.frame(round(res$regret, 4))
+    df$方案 <- res$action_names
+    df$最大后悔值 <- round(res$row_max_regret, 4)
+    df <- df[, c("方案", res$state_names, "最大后悔值")]
+    datatable(df, rownames = FALSE,
+              options = list(dom = "t", paging = FALSE, ordering = FALSE),
+              caption = if (res$is_benefit) "收益型后悔值矩阵" else "成本型后悔值矩阵")
+  })
+
+  output$explain_box <- renderUI({
+    req(calc())
+    res <- calc()
+    if (res$is_benefit) {
+      txt <- sprintf(
+        "当前为<b>收益型</b>问题，Hurwicz 乐观系数 alpha=%.2f。%s 收益型问题中，alpha=1 退化为 Maximax，alpha=0 退化为 Maximin；Savage 准则选择最大后悔值最小的方案。",
+        res$alpha,
+        if (res$alpha == 1) "alpha=1 表示完全乐观，" else if (res$alpha == 0) "alpha=0 表示完全悲观，" else ""
+      )
+    } else {
+      txt <- sprintf(
+        "当前为<b>成本型</b>问题，Hurwicz 乐观系数 alpha=%.2f。%s 成本型问题中，alpha=1 退化为 Minimin（乐观），alpha=0 退化为 Minimax（悲观）；Savage 准则选择最大后悔值最小的方案。",
+        res$alpha,
+        if (res$alpha == 1) "alpha=1 表示完全乐观，" else if (res$alpha == 0) "alpha=0 表示完全悲观，" else ""
+      )
+    }
+    div(class = "info-box", h4("决策解释"), p(HTML(txt)),
+        p("若某准则出现多个并列最优方案，推荐栏会同时列出，避免遗漏。"))
+  })
+
+  output$range_plot <- renderPlot({
+    req(calc())
+    res <- calc()
     df <- data.frame(
-      决策方案 = rownames(rv$result$regret),
-      as.data.frame(round(rv$result$regret, 4), check.names = FALSE),
-      check.names = FALSE
+      方案 = rep(res$action_names, each = 2),
+      端点 = rep(c("最差", "最好"), length(res$action_names)),
+      值 = c(rbind(if (res$is_benefit) res$maximin else res$minimax_cost,
+                   if (res$is_benefit) res$maximax else res$minimin))
     )
-    datatable(
-      df,
-      rownames = FALSE,
-      options = list(dom = "t", paging = FALSE, ordering = FALSE),
-      caption = "后悔矩阵"
-    )
-  })
-
-  output$criteria_plot <- renderPlot({
-    req(rv$result)
-    df <- rv$result$result_df
-    df_long <- tidyr::pivot_longer(
-      df,
-      cols = -决策方案,
-      names_to = "准则",
-      values_to = "评价值"
-    )
-    df_long$准则 <- factor(df_long$准则, levels = names(df)[-1])
-
-    y_label <- if (rv$result$is_benefit) "评价值（万元）" else "评价值（万元）"
-
-    ggplot(df_long, aes(x = 准则, y = 评价值, fill = 决策方案, group = 决策方案)) +
-      geom_col(position = position_dodge(width = 0.8), width = 0.7) +
-      geom_text(aes(label = round(评价值, 1)),
-                position = position_dodge(width = 0.8),
-                vjust = -0.5, size = 3.5) +
-      labs(x = NULL, y = y_label, fill = "方案") +
+    hurwicz_df <- data.frame(方案 = res$action_names, Hurwicz = res$hurwicz)
+    p <- ggplot(df, aes(x = 值, y = 方案, group = 方案)) +
+      geom_line(linewidth = 1.2, color = "#5b7083") +
+      geom_point(aes(color = 端点), size = 3) +
+      geom_point(data = hurwicz_df, aes(x = Hurwicz, y = 方案),
+                 shape = 23, fill = "#b42318", color = "#b42318", size = 4) +
+      scale_color_manual(values = c("最差" = "#b42318", "最好" = "#1b7f3b")) +
+      labs(title = "各方案最好-最差结果范围", x = "金额（万元）", y = NULL) +
       theme_minimal(base_size = 14) +
-      theme(axis.text.x = element_text(angle = 15, hjust = 1))
+      theme(legend.position = "bottom")
+    p
   })
 
-  output$payoff_plot <- renderPlot({
-    req(rv$payoff_df)
-    df <- rv$payoff_df
-    df$方案 <- rownames(df)
-    df_long <- tidyr::pivot_longer(
-      df,
-      cols = -方案,
-      names_to = "状态",
-      values_to = "值"
-    )
+  self_test_res <- eventReactive(input$run_self_test, {
+    run_uncertainty_self_tests()
+  })
 
-    y_label <- if (rv$result$is_benefit) "收益（万元）" else "成本（万元）"
-
-    ggplot(df_long, aes(x = 状态, y = 值, fill = 方案)) +
-      geom_col(position = position_dodge(width = 0.8), width = 0.7) +
-      geom_text(aes(label = 值),
-                position = position_dodge(width = 0.8),
-                vjust = -0.4, size = 3.5) +
-      labs(x = NULL, y = y_label, fill = "方案") +
-      theme_minimal(base_size = 14)
+  output$self_test_table <- renderDT({
+    req(self_test_res())
+    df <- self_test_res()
+    df$是否通过 <- ifelse(df$是否通过,
+                          "<span class='pass'>通过</span>",
+                          "<span class='fail'>未通过</span>")
+    datatable(df, rownames = FALSE, escape = FALSE,
+              options = list(paging = FALSE, searching = FALSE, ordering = FALSE))
   })
 }
 

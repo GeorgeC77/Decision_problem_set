@@ -1,161 +1,251 @@
-# 依赖包：shiny, DT, ggplot2, rhandsontable, tidyr
-# install.packages(c("shiny", "DT", "ggplot2", "rhandsontable", "tidyr"))
+# 依赖包：shiny, DT, rhandsontable, ggplot2, tidyr
+# install.packages(c("shiny", "DT", "rhandsontable", "ggplot2", "tidyr"))
 
 library(shiny)
 library(DT)
-library(ggplot2)
 library(rhandsontable)
+library(ggplot2)
 library(tidyr)
 
 # =========================
-# 马尔可夫决策辅助函数
+# 核心计算函数
 # =========================
 
-mat_power <- function(P, n) {
-  if (n == 0) return(diag(nrow(P)))
-  result <- P
-  if (n == 1) return(result)
-  for (i in 2:n) {
-    result <- result %*% P
+validate_transition_matrix <- function(P, name = "转移矩阵") {
+  P <- as.matrix(P)
+  if (nrow(P) != ncol(P)) {
+    return(list(ok = FALSE, msg = sprintf("%s 不是方阵（%d 行 × %d 列），请检查输入。", name, nrow(P), ncol(P))))
   }
-  result
+  if (any(is.na(P))) {
+    return(list(ok = FALSE, msg = sprintf("%s 存在缺失值，请检查输入。", name)))
+  }
+  if (any(P < 0)) {
+    return(list(ok = FALSE, msg = sprintf("%s 存在负值，转移概率必须非负，请检查输入。", name)))
+  }
+  rs <- rowSums(P)
+  if (any(abs(rs - 1) > 1e-6)) {
+    bad <- which(abs(rs - 1) > 1e-6)
+    return(list(ok = FALSE, msg = sprintf("%s 第 %s 行的概率之和不等于 1（实际为 %s），请检查输入。",
+                                          name, paste(bad, collapse = ", "), paste(round(rs[bad], 4), collapse = ", "))))
+  }
+  list(ok = TRUE, msg = "")
 }
 
-step_prob <- function(P, S0, n) {
-  if (n == 0) return(as.vector(S0))
-  as.vector(S0 %*% mat_power(P, n))
+validate_initial_distribution <- function(pi0, n) {
+  pi0 <- as.vector(pi0)
+  if (length(pi0) != n) {
+    return(list(ok = FALSE, msg = sprintf("初始分布长度（%d）与状态数（%d）不一致，请检查输入。", length(pi0), n)))
+  }
+  if (any(is.na(pi0))) {
+    return(list(ok = FALSE, msg = "初始分布存在缺失值，请检查输入。"))
+  }
+  if (any(pi0 < 0)) {
+    return(list(ok = FALSE, msg = "初始分布存在负值，概率必须非负。"))
+  }
+  if (abs(sum(pi0) - 1) > 1e-6) {
+    return(list(ok = FALSE, msg = sprintf("初始分布之和为 %.6f，必须等于 1，请检查输入。", sum(pi0))))
+  }
+  list(ok = TRUE, msg = "")
 }
 
-# 解 pi = pi P，sum(pi)=1
-steady_state <- function(P) {
+mat_power <- function(M, k) {
+  if (k == 0) return(diag(nrow(M)))
+  if (k == 1) return(M)
+  res <- diag(nrow(M))
+  base <- M
+  while (k > 0) {
+    if (k %% 2 == 1) res <- res %*% base
+    base <- base %*% base
+    k <- k %/% 2
+  }
+  res
+}
+
+# n 步演化：π_t = π_0 P^t
+calc_markov_evolution <- function(P, pi0, n_steps) {
+  v <- validate_transition_matrix(P, "转移矩阵")
+  if (!v$ok) stop(v$msg)
+  v2 <- validate_initial_distribution(pi0, nrow(P))
+  if (!v2$ok) stop(v2$msg)
+
+  P <- as.matrix(P)
+  pi0 <- as.vector(pi0)
+  rows <- lapply(0:n_steps, function(k) as.vector(pi0 %*% mat_power(P, k)))
+  mat <- do.call(rbind, rows)
+  colnames(mat) <- colnames(P)
+  mat
+}
+
+# 稳态分布：π = πP，∑π=1
+calc_markov_stationary <- function(P) {
+  v <- validate_transition_matrix(P, "转移矩阵")
+  if (!v$ok) stop(v$msg)
+
   n <- nrow(P)
-  if (n != ncol(P)) return(rep(NA_real_, n))
   A <- t(P) - diag(n)
   A <- rbind(A, rep(1, n))
   b <- c(rep(0, n), 1)
   S <- tryCatch(qr.solve(A, b), error = function(e) rep(NA_real_, n))
-  if (any(is.na(S))) return(rep(NA_real_, n))
+  if (any(is.na(S))) {
+    stop("稳态分布求解失败，可能是转移矩阵奇异或链不满足不可约/非周期条件。请检查输入。")
+  }
+  # 保证非负并归一化
   S <- pmax(S, 0)
   S <- S / sum(S)
-  as.vector(S)
-}
-
-# 稳态期望年利润：sum_{i,j} pi_i * P_{ij} * R_{ij}
-expected_profit <- function(P, R, pi) {
-  n <- nrow(P)
-  exp <- 0
-  for (i in 1:n) {
-    for (j in 1:n) {
-      exp <- exp + pi[i] * P[i, j] * R[i, j]
-    }
-  }
-  exp
-}
-
-# 校验转移矩阵：非负、行和为 1
-validate_transition <- function(P, name = "转移矩阵") {
-  P <- suppressWarnings(as.numeric(P))
-  if (any(is.na(P))) {
-    return(list(valid = FALSE, msg = sprintf("%s 存在缺失或非数值。", name), P = P))
-  }
-  if (any(P < 0)) {
-    return(list(valid = FALSE, msg = sprintf("%s 存在负值，概率必须非负。", name), P = P))
-  }
-  n <- sqrt(length(P))
-  P <- matrix(P, nrow = n)
-  rs <- rowSums(P)
-  if (any(rs == 0)) {
-    return(list(valid = FALSE, msg = sprintf("%s 存在行和为 0 的行。", name), P = P))
-  }
-  msg <- NULL
-  if (any(abs(rs - 1) > 1e-06)) {
-    P <- P / rs
-    msg <- sprintf("%s 某些行之和不等于 1，已自动归一化。", name)
-  }
-  list(valid = TRUE, msg = msg, P = P)
-}
-
-# 校验初始分布：非负、和为 1
-validate_initial_distribution <- function(S0, name = "初始状态分布") {
-  S0 <- suppressWarnings(as.numeric(S0))
-  if (any(is.na(S0))) {
-    return(list(valid = FALSE, msg = sprintf("%s 存在缺失或非数值。", name), S0 = S0))
-  }
-  if (any(S0 < 0)) {
-    return(list(valid = FALSE, msg = sprintf("%s 存在负值，概率必须非负。", name), S0 = S0))
-  }
-  s <- sum(S0)
-  if (abs(s - 1) > 1e-06) {
-    return(list(valid = FALSE,
-                msg = sprintf("%s 之和为 %.6f，必须等于 1，请修改输入。", name, s),
-                S0 = S0))
-  }
-  list(valid = TRUE, msg = NULL, S0 = S0 / s)
+  names(S) <- colnames(P)
+  S
 }
 
 # 吸收链分析
-absorption_analysis <- function(P) {
+calc_absorbing_chain <- function(P) {
+  v <- validate_transition_matrix(P, "转移矩阵")
+  if (!v$ok) stop(v$msg)
+
   n <- nrow(P)
-  # 状态 i 吸收当且仅当 p_ii = 1 且该行其余元素为 0
+  state_names <- colnames(P)
+  if (is.null(state_names)) state_names <- paste0("状态", seq_len(n))
+
+  # 严格吸收态：p_ii = 1 且该行其余元素为 0
   absorbing <- which(abs(diag(P) - 1) < 1e-6 & rowSums(P) - diag(P) < 1e-6)
   nonabs <- setdiff(seq_len(n), absorbing)
-  if (length(absorbing) == 0 || length(nonabs) == 0) {
-    return(NULL)
+
+  if (length(absorbing) == 0) {
+    return(list(has_absorbing = FALSE, msg = "该转移矩阵没有吸收态，无法进行标准吸收链分析。"))
   }
-  Q <- P[nonabs, nonabs, drop = FALSE]
-  R <- P[nonabs, absorbing, drop = FALSE]
-  Iq <- diag(length(nonabs))
-  N <- tryCatch(solve(Iq - Q), error = function(e) NULL)
+  if (length(nonabs) == 0) {
+    return(list(has_absorbing = TRUE, has_transient = FALSE, msg = "所有状态均为吸收态。"))
+  }
+
+  ord <- c(nonabs, absorbing)
+  P_reord <- P[ord, ord, drop = FALSE]
+  m <- length(nonabs)
+  Q <- P_reord[1:m, 1:m, drop = FALSE]
+  R <- P_reord[1:m, (m + 1):n, drop = FALSE]
+
+  N <- tryCatch(solve(diag(m) - Q), error = function(e) NULL)
   if (is.null(N)) {
-    return(list(absorbing = absorbing, nonabs = nonabs, Q = Q, R = R,
-                N = NULL, B = NULL, t = NULL, singular = TRUE))
+    stop("基本矩阵 (I - Q) 不可逆，无法完成吸收链分析。请检查转移矩阵。")
   }
   B <- N %*% R
-  t <- as.vector(N %*% rep(1, length(nonabs)))
+  t_vec <- as.vector(N %*% rep(1, m))
+
+  rownames(Q) <- colnames(Q) <- state_names[nonabs]
+  rownames(R) <- state_names[nonabs]
+  colnames(R) <- state_names[absorbing]
+  rownames(N) <- colnames(N) <- state_names[nonabs]
+  rownames(B) <- state_names[nonabs]
+  colnames(B) <- state_names[absorbing]
+  names(t_vec) <- state_names[nonabs]
+
   list(
-    absorbing = absorbing,
-    nonabs = nonabs,
+    has_absorbing = TRUE,
+    has_transient = TRUE,
+    absorbing_idx = absorbing,
+    transient_idx = nonabs,
+    absorbing_names = state_names[absorbing],
+    transient_names = state_names[nonabs],
+    P_reord = P_reord,
     Q = Q,
     R = R,
     N = N,
     B = B,
-    t = t,
-    singular = FALSE
+    t = t_vec
   )
 }
 
-# 检查并修正概率向量行和
-normalize_rows <- function(mat, tol = 1e-4) {
-  rs <- rowSums(mat)
-  if (any(abs(rs - 1) > tol)) {
-    return(list(mat = mat, ok = FALSE, max_dev = max(abs(rs - 1))))
+# =========================
+# 教师自测
+# =========================
+
+run_markov_self_tests <- function() {
+  tests <- list()
+
+  P <- matrix(c(0.9, 0.1, 0.5, 0.5), nrow = 2, byrow = TRUE,
+              dimnames = list(c("S1", "S2"), c("S1", "S2")))
+  pi0 <- c(0.5, 0.5)
+
+  evol <- calc_markov_evolution(P, pi0, 2)
+  expected_pi2 <- as.vector(pi0 %*% mat_power(P, 2))
+  passed_evol <- all(abs(evol[3, ] - expected_pi2) < 1e-6)
+  tests[[length(tests) + 1]] <- list(
+    测试名称 = "行随机 π_{t+1}=π_tP 演化",
+    实际输出 = paste0("t=2: ", paste(round(evol[3, ], 4), collapse = ", ")),
+    标准答案 = paste0("t=2: ", paste(round(expected_pi2, 4), collapse = ", ")),
+    是否通过 = passed_evol,
+    失败提示 = if (passed_evol) "" else "请检查是否使用行随机约定 π_{t+1}=π_tP，而非列随机。"
+  )
+
+  stat <- calc_markov_stationary(P)
+  expected_stat <- c(5/6, 1/6)
+  passed_stat <- all(abs(stat - expected_stat) < 1e-6)
+  tests[[length(tests) + 1]] <- list(
+    测试名称 = "稳态分布 π=πP",
+    实际输出 = paste(round(stat, 4), collapse = ", "),
+    标准答案 = "0.8333, 0.1667",
+    是否通过 = passed_stat,
+    失败提示 = if (passed_stat) "" else "稳态分布应满足 π=πP 且元素和为 1。"
+  )
+
+  P_abs <- matrix(c(1, 0, 0,
+                    0.2, 0.6, 0.2,
+                    0, 0, 1),
+                  nrow = 3, byrow = TRUE,
+                  dimnames = list(c("A", "T", "C"), c("A", "T", "C")))
+  abs_res <- calc_absorbing_chain(P_abs)
+  passed_abs <- abs_res$has_absorbing && abs_res$has_transient &&
+    length(abs_res$absorbing_names) == 2 &&
+    all(abs_res$absorbing_names == c("A", "C")) &&
+    all(abs(abs_res$t - 2.5) < 1e-6) &&
+    all(abs(abs_res$B - matrix(c(0.5, 0.5), nrow = 1)) < 1e-6)
+  tests[[length(tests) + 1]] <- list(
+    测试名称 = "吸收链 Q/R/N/B/t",
+    实际输出 = paste0("吸收态=", paste(abs_res$absorbing_names, collapse = ","),
+                    "; t=", paste(round(abs_res$t, 4), collapse = ", "),
+                    "; B=", paste(round(abs_res$B, 4), collapse = ", ")),
+    标准答案 = "吸收态=A,C; t=2.5; B=0.5,0.5",
+    是否通过 = passed_abs,
+    失败提示 = if (passed_abs) "" else "请检查吸收态判定、状态重排后 Q/R 提取及 N=(I-Q)^{-1}、B=NR、t=N·1 的计算。"
+  )
+
+  err_cases <- list(
+    list(name = "转移矩阵行和 ≠ 1", f = function() calc_markov_evolution(matrix(c(0.9, 0.2, 0.5, 0.5), nrow = 2, byrow = TRUE), c(0.5, 0.5), 1),
+         hint = "每行概率之和必须等于 1。"),
+    list(name = "转移矩阵含负数", f = function() calc_markov_evolution(matrix(c(-0.1, 1.1, 0.5, 0.5), nrow = 2, byrow = TRUE), c(0.5, 0.5), 1),
+         hint = "转移概率必须非负。"),
+    list(name = "初始分布和 ≠ 1", f = function() calc_markov_evolution(P, c(0.6, 0.5), 1),
+         hint = "初始分布之和必须等于 1。"),
+    list(name = "非方阵", f = function() calc_markov_stationary(matrix(c(0.5, 0.5, 0.3, 0.3, 0.4, 0.4), nrow = 2, byrow = TRUE)),
+         hint = "转移矩阵必须是方阵。")
+  )
+  for (case in err_cases) {
+    passed <- tryCatch({ case$f(); FALSE }, error = function(e) TRUE)
+    tests[[length(tests) + 1]] <- list(
+      测试名称 = paste0("错误输入：", case$name),
+      实际输出 = if (passed) "正确报错" else "未报错",
+      标准答案 = "正确报错",
+      是否通过 = passed,
+      失败提示 = if (passed) "" else case$hint
+    )
   }
-  if (any(abs(rs - 1) > 1e-8)) {
-    mat <- mat / rs
-  }
-  list(mat = mat, ok = TRUE, max_dev = max(abs(rs - 1)))
+
+  df <- do.call(rbind, lapply(tests, as.data.frame, stringsAsFactors = FALSE))
+  rownames(df) <- NULL
+  df
 }
 
 # =========================
-# 默认数据（教材第六章习题 7：2 状态）
+# 默认数据
 # =========================
-default_states <- c("畅销", "滞销")
-profit_mat <- matrix(
-  c(200, -20,
-    100, -60),
-  nrow = 2, byrow = TRUE
+default_n_states <- 3
+default_state_names <- c("状态1", "状态2", "状态3")
+default_P <- matrix(
+  c(0.7, 0.2, 0.1,
+    0.3, 0.5, 0.2,
+    0.1, 0.3, 0.6),
+  nrow = 3, byrow = TRUE,
+  dimnames = list(default_state_names, default_state_names)
 )
-PA <- matrix(
-  c(0.8, 0.2,
-    0.4, 0.6),
-  nrow = 2, byrow = TRUE
-)
-PB <- matrix(
-  c(0.7, 0.3,
-    0.5, 0.5),
-  nrow = 2, byrow = TRUE
-)
-S0_default <- c(0, 1)
+default_pi0 <- c(1, 0, 0)
 
 # =========================
 # UI
@@ -182,7 +272,7 @@ ui <- fluidPage(
         min-height: 100px;
       }
       .metric-title { color: #5b7083; font-size: 13px; margin-bottom: 8px; }
-      .metric-value { font-size: 24px; font-weight: 700; color: #1f3b5b; }
+      .metric-value { font-size: 22px; font-weight: 700; color: #1f3b5b; }
       .formula-box {
         background: #f8fafc; border: 1px solid #d9e2ec;
         border-radius: 10px; padding: 14px 16px; line-height: 1.8;
@@ -192,10 +282,12 @@ ui <- fluidPage(
         padding: 12px 16px; margin-bottom: 14px; color: #7a4b00;
       }
       .small-note { color: #667085; font-size: 13px; }
+      .pass { color: #1b7f3b; font-weight: bold; }
+      .fail { color: #b42318; font-weight: bold; }
     "))
   ),
 
-  titlePanel(div(class = "title-main", "马尔可夫分析教学网页：状态转移、稳态分布与吸收链")),
+  titlePanel(div(class = "title-main", "马尔可夫链教学网页：状态演化、稳态与吸收链")),
 
   div(
     class = "copyright-box",
@@ -212,36 +304,29 @@ ui <- fluidPage(
     sidebarPanel(
       width = 3,
       h4("状态设置"),
-      numericInput("n_states", "状态数量", value = 2, min = 2, max = 8, step = 1),
+      numericInput("n_states", "状态数量", value = default_n_states, min = 2, max = 15),
       actionButton("generate", "生成/重置矩阵", class = "btn-primary"),
-      actionButton("reset_default", "恢复默认案例", class = "btn-warning"),
+      actionButton("reset_default", "恢复默认值", class = "btn-warning"),
       tags$hr(),
 
-      h4("预测期数"),
-      numericInput("n_steps", "预测时期数 n", value = 5, min = 1, max = 50, step = 1),
+      h4("演化设置"),
+      numericInput("n_steps", "演化步数", value = 10, min = 1, max = 100),
       tags$hr(),
 
-      h4("初始状态分布 π₀"),
-      helpText("行=概率，列=状态，非负且和为 1。"),
-      rHandsontableOutput("S0_hot"),
+      h4("操作"),
+      actionButton("calculate", "计算演化 / 稳态 / 吸收链", class = "btn-success"),
       tags$hr(),
 
-      h4("策略 A 转移矩阵"),
-      helpText("行=当前状态，列=下一状态，每行和为 1。"),
-      rHandsontableOutput("PA_hot"),
-      tags$hr(),
+      checkboxInput("teacher_mode", "显示教师自测区域", value = FALSE),
 
-      h4("策略 B 转移矩阵"),
-      helpText("行=当前状态，列=下一状态，每行和为 1。"),
-      rHandsontableOutput("PB_hot"),
       tags$hr(),
-
-      h4("利润矩阵 R"),
-      helpText("行=上一期状态，列=本期状态，单位：万元。"),
-      rHandsontableOutput("R_hot"),
-      tags$hr(),
-
-      actionButton("calculate", "计算并比较", class = "btn-success")
+      helpText("输入说明："),
+      tags$ul(
+        tags$li("转移矩阵 P：行=当前状态，列=下一状态，每行之和必须等于 1。"),
+        tags$li("本页面采用行随机约定：π_{t+1} = π_t P。"),
+        tags$li("初始分布：各状态在 t=0 的概率，非负且和等于 1。"),
+        tags$li("吸收态：p_{ii}=1 且该行其余元素为 0。")
+      )
     ),
 
     mainPanel(
@@ -252,63 +337,94 @@ ui <- fluidPage(
           br(),
           div(
             class = "info-box",
-            h4("教学目标"),
-            p("本章对应教材第六章“序贯决策分析”。通过本网页，学生可以："),
-            tags$ul(
-              tags$li("理解马尔可夫链的状态转移矩阵、行随机约定与无后效性；"),
-              tags$li("计算 n 步转移后的状态概率 π_t = π_0 P^t；"),
-              tags$li("求稳态分布 π（满足 π = πP）并计算稳态期望利润；"),
-              tags$li("识别吸收状态，计算基本矩阵 N、吸收概率 B 与期望吸收时间 t。")
-            ),
+            h4("方法背景"),
+            p("马尔可夫链是一种无后效性的随机过程，未来状态只依赖于当前状态。本网页帮助理解状态概率演化、稳态分布以及吸收链分析。"),
             tags$details(
               tags$summary("查看计算说明"),
               br(),
               tags$ul(
-                tags$li("行随机矩阵：P 的每一行之和为 1；状态更新为 π_{t+1} = π_t · P。"),
-                tags$li("n 步状态概率：π_t = π_0 · P^t。"),
-                tags$li("稳态分布满足 π = πP，且元素之和为 1；仅当链不可约且非周期时才存在唯一稳态分布。"),
-                tags$li("吸收链：状态 i 吸收当且仅当 p_ii = 1 且其余 p_ij = 0。基本矩阵 N = (I - Q)^{-1}，吸收概率 B = N·R，期望吸收时间 t = N·1。")
+                tags$li("行随机约定：π_{t+1} = π_t P，即 P 的每一行之和为 1。"),
+                tags$li("n 步演化：π_t = π_0 P^t。"),
+                tags$li("稳态分布：满足 π = πP 且 ∑π_i = 1 的概率向量。不可约、非周期链存在唯一稳态分布。"),
+                tags$li("吸收链：将状态重排为（暂态，吸收态），P = [Q R; 0 I]，基本矩阵 N = (I - Q)^{-1}，吸收概率 B = NR，期望吸收时间 t = N·1。")
               )
             ),
             tags$hr(),
-            h4("基本约定"),
+            h4("核心教学目标"),
             tags$ul(
-              tags$li("行随机矩阵：P 的每一行是概率分布，行之和为 1；"),
-              tags$li("状态更新：π_{t+1} = π_t · P；"),
-              tags$li("稳态存在条件：马尔可夫链不可约且非周期；吸收链不存在唯一稳态分布；"),
-              tags$li("稳态结论仅适用于长期经营，短期决策应结合 n 步状态概率演化。")
+              tags$li("掌握行随机转移矩阵的构造与校验；"),
+              tags$li("能够计算多步状态概率演化；"),
+              tags$li("理解稳态分布的求解条件与计算方法；"),
+              tags$li("掌握吸收链中 Q、R、N、B、t 的经济/物理含义。")
             )
           )
         ),
 
         tabPanel(
-          "计算结果",
+          "转移矩阵",
           br(),
-          uiOutput("validation_msg"),
-          fluidRow(
-            column(6, uiOutput("metric_A")),
-            column(6, uiOutput("metric_B"))
+          div(
+            class = "info-box",
+            h4("转移概率矩阵 P"),
+            helpText("行=当前状态，列=下一状态，每行之和必须等于 1。"),
+            rHandsontableOutput("P_hot")
+          ),
+          div(
+            class = "info-box",
+            h4("初始分布 π_0"),
+            helpText("t=0 时各状态的概率，非负且和等于 1。"),
+            rHandsontableOutput("pi0_hot")
+          )
+        ),
+
+        tabPanel(
+          "n 步演化",
+          br(),
+          div(
+            class = "info-box",
+            h4("状态概率演化表"),
+            DTOutput("evolution_table")
+          ),
+          div(
+            class = "info-box",
+            h4("演化趋势图"),
+            plotOutput("evolution_plot", height = "400px")
+          )
+        ),
+
+        tabPanel(
+          "稳态分布",
+          br(),
+          div(
+            class = "info-box",
+            h4("稳态分布 π"),
+            DTOutput("stationary_table")
           ),
           br(),
-          h4("状态概率演化"),
-          DTOutput("prob_table"),
-          br(),
-          h4("推荐策略"),
-          uiOutput("recommend")
+          uiOutput("stationary_note")
         ),
 
         tabPanel(
-          "吸收链分析",
+          "吸收链",
           br(),
-          uiOutput("absorb_summary"),
-          br(),
-          uiOutput("absorb_tables")
+          uiOutput("absorbing_ui")
         ),
 
         tabPanel(
-          "图形分析",
+          "教师自测",
           br(),
-          plotOutput("trend_plot", height = "420px")
+          conditionalPanel(
+            condition = "input.teacher_mode == true",
+            div(class = "info-box",
+                h4("教师自测"),
+                actionButton("run_self_test", "运行自测", class = "btn-info"),
+                br(), br(),
+                DTOutput("self_test_table"))
+          ),
+          conditionalPanel(
+            condition = "input.teacher_mode == false",
+            div(class = "info-box", p("请在左侧勾选“显示教师自测区域”后运行自测。"))
+          )
         )
       )
     )
@@ -321,333 +437,235 @@ ui <- fluidPage(
 server <- function(input, output, session) {
 
   rv <- reactiveValues(
-    state_names = default_states,
-    S0_df = as.data.frame(matrix(S0_default, nrow = 1)),
-    PA_df = as.data.frame(PA),
-    PB_df = as.data.frame(PB),
-    R_df = as.data.frame(profit_mat),
-    res = NULL
+    P_df = as.data.frame(default_P),
+    pi0_df = as.data.frame(matrix(default_pi0, nrow = 1)),
+    state_names = default_state_names,
+    n_states = default_n_states,
+    calc_res = NULL
   )
 
   observe({
-    colnames(rv$S0_df) <- rv$state_names
-    colnames(rv$PA_df) <- rv$state_names
-    rownames(rv$PA_df) <- rv$state_names
-    colnames(rv$PB_df) <- rv$state_names
-    rownames(rv$PB_df) <- rv$state_names
-    colnames(rv$R_df) <- rv$state_names
-    rownames(rv$R_df) <- rv$state_names
+    colnames(rv$P_df) <- rv$state_names
+    rownames(rv$P_df) <- rv$state_names
+    colnames(rv$pi0_df) <- rv$state_names
+    rownames(rv$pi0_df) <- "概率"
   })
 
   observeEvent(input$generate, {
     n <- input$n_states
+    rv$n_states <- n
     rv$state_names <- paste0("状态", seq_len(n))
-    rv$S0_df <- as.data.frame(matrix(0, nrow = 1, ncol = n))
-    rv$PA_df <- as.data.frame(diag(n))
-    rv$PB_df <- as.data.frame(diag(n))
-    rv$R_df <- as.data.frame(matrix(0, nrow = n, ncol = n))
-    colnames(rv$S0_df) <- rv$state_names
-    colnames(rv$PA_df) <- rv$state_names
-    rownames(rv$PA_df) <- rv$state_names
-    colnames(rv$PB_df) <- rv$state_names
-    rownames(rv$PB_df) <- rv$state_names
-    colnames(rv$R_df) <- rv$state_names
-    rownames(rv$R_df) <- rv$state_names
-    rv$res <- NULL
+    rv$P_df <- as.data.frame(diag(n))
+    rv$pi0_df <- as.data.frame(matrix(c(1, rep(0, n - 1)), nrow = 1))
+    colnames(rv$P_df) <- rv$state_names
+    rownames(rv$P_df) <- rv$state_names
+    colnames(rv$pi0_df) <- rv$state_names
+    rownames(rv$pi0_df) <- "概率"
+    rv$calc_res <- NULL
   })
 
   observeEvent(input$reset_default, {
-    rv$state_names <- default_states
-    rv$S0_df <- as.data.frame(matrix(S0_default, nrow = 1))
-    rv$PA_df <- as.data.frame(PA)
-    rv$PB_df <- as.data.frame(PB)
-    rv$R_df <- as.data.frame(profit_mat)
-    colnames(rv$S0_df) <- rv$state_names
-    colnames(rv$PA_df) <- rv$state_names
-    rownames(rv$PA_df) <- rv$state_names
-    colnames(rv$PB_df) <- rv$state_names
-    rownames(rv$PB_df) <- rv$state_names
-    colnames(rv$R_df) <- rv$state_names
-    rownames(rv$R_df) <- rv$state_names
-    updateNumericInput(session, "n_states", value = 2)
-    rv$res <- NULL
+    rv$n_states <- default_n_states
+    rv$state_names <- default_state_names
+    rv$P_df <- as.data.frame(default_P)
+    rv$pi0_df <- as.data.frame(matrix(default_pi0, nrow = 1))
+    colnames(rv$P_df) <- rv$state_names
+    rownames(rv$P_df) <- rv$state_names
+    colnames(rv$pi0_df) <- rv$state_names
+    rownames(rv$pi0_df) <- "概率"
+    updateNumericInput(session, "n_states", value = default_n_states)
+    updateNumericInput(session, "n_steps", value = 10)
+    rv$calc_res <- NULL
   })
 
-  make_hot <- function(df, h = 240) {
-    rhandsontable(df, rowHeaders = rownames(df), stretchH = "all", height = h, contextMenu = TRUE) %>%
+  output$P_hot <- renderRHandsontable({
+    req(rv$P_df)
+    rhandsontable(
+      rv$P_df,
+      rowHeaders = rownames(rv$P_df),
+      stretchH = "all",
+      height = 320,
+      contextMenu = TRUE
+    ) %>%
       hot_table(manualColumnResize = TRUE) %>%
-      hot_cols(type = "numeric", format = "0.0000") %>%
+      hot_cols(type = "numeric", format = "0.00") %>%
       hot_cols(renderer = "
         function (instance, td, row, col, prop, value, cellProperties) {
           Handsontable.renderers.NumericRenderer.apply(this, arguments);
           td.style.textAlign = 'center';
         }
       ")
-  }
-
-  output$S0_hot <- renderRHandsontable({ make_hot(rv$S0_df, 100) })
-  output$PA_hot <- renderRHandsontable({ make_hot(rv$PA_df, 240) })
-  output$PB_hot <- renderRHandsontable({ make_hot(rv$PB_df, 240) })
-  output$R_hot <- renderRHandsontable({ make_hot(rv$R_df, 240) })
-
-  observeEvent(input$calculate, {
-    S0_tbl <- hot_to_r(input$S0_hot)
-    PA_tbl <- hot_to_r(input$PA_hot)
-    PB_tbl <- hot_to_r(input$PB_hot)
-    R_tbl <- hot_to_r(input$R_hot)
-
-    if (is.null(S0_tbl) || is.null(PA_tbl) || is.null(PB_tbl) || is.null(R_tbl)) {
-      showNotification("请先生成并填写所有矩阵。", type = "error")
-      return()
-    }
-
-    S0v <- suppressWarnings(as.numeric(S0_tbl[1, ]))
-    vi <- validate_initial_distribution(S0v, "初始状态分布")
-    if (!vi$valid) {
-      showNotification(vi$msg, type = "error")
-      return()
-    }
-    S0v <- vi$S0
-
-    val_A <- validate_transition(as.matrix(PA_tbl), "策略 A 转移矩阵")
-    val_B <- validate_transition(as.matrix(PB_tbl), "策略 B 转移矩阵")
-    if (!val_A$valid || !val_B$valid) {
-      showNotification(paste(val_A$msg, val_B$msg, sep = " "), type = "error")
-      return()
-    }
-    if (!is.null(val_A$msg)) showNotification(val_A$msg, type = "warning")
-    if (!is.null(val_B$msg)) showNotification(val_B$msg, type = "warning")
-
-    PA <- val_A$P
-    PB <- val_B$P
-    R <- suppressWarnings(as.matrix(R_tbl))
-    if (any(is.na(R))) {
-      showNotification("利润矩阵存在缺失或非数值。", type = "error")
-      return()
-    }
-
-    n <- input$n_steps
-    state_names <- colnames(PA_tbl)
-
-    # n 步概率演化
-    prob_A <- t(sapply(0:n, function(k) step_prob(PA, S0v, k)))
-    prob_B <- t(sapply(0:n, function(k) step_prob(PB, S0v, k)))
-    colnames(prob_A) <- state_names
-    colnames(prob_B) <- state_names
-    prob_A <- as.data.frame(prob_A)
-    prob_B <- as.data.frame(prob_B)
-    prob_A$策略 <- "A"
-    prob_B$策略 <- "B"
-    prob_A$时期 <- 0:n
-    prob_B$时期 <- 0:n
-
-    # 检查每期概率和
-    check_A <- normalize_rows(prob_A[, state_names, drop = FALSE])
-    check_B <- normalize_rows(prob_B[, state_names, drop = FALSE])
-    if (!check_A$ok || !check_B$ok) {
-      showNotification(sprintf("状态概率演化出现明显偏离 1 的行（最大偏差 %.6f），请检查输入矩阵。",
-                               max(check_A$max_dev, check_B$max_dev)), type = "error")
-      return()
-    }
-    if (check_A$max_dev > 1e-8 || check_B$max_dev > 1e-8) {
-      showNotification("状态概率演化因数值误差已自动归一化。", type = "warning")
-      prob_A[, state_names] <- check_A$mat
-      prob_B[, state_names] <- check_B$mat
-    }
-
-    # 稳态
-    ss_A <- steady_state(PA)
-    ss_B <- steady_state(PB)
-
-    # 稳态期望利润
-    exp_A <- expected_profit(PA, R, ss_A)
-    exp_B <- expected_profit(PB, R, ss_B)
-
-    # 吸收链分析
-    abs_A <- absorption_analysis(PA)
-    abs_B <- absorption_analysis(PB)
-
-    rv$res <- list(
-      PA = PA, PB = PB, R = R, S0 = S0v,
-      prob_A = prob_A, prob_B = prob_B,
-      ss_A = ss_A, ss_B = ss_B,
-      exp_A = exp_A, exp_B = exp_B,
-      abs_A = abs_A, abs_B = abs_B,
-      state_names = state_names
-    )
   })
 
-  output$validation_msg <- renderUI({
-    req(rv$res)
-    div(class = "info-box",
-        p(strong("转移矩阵已校验。")),
-        p("采用行随机矩阵约定：π_{t+1} = π_t · P。每行概率之和已校验为 1；初始状态分布之和也已校验为 1。"),
-        p("稳态结论成立的前提是马尔可夫链不可约且非周期；若链为吸收链、周期链或存在多个闭类，则状态分布可能不唯一、震荡或不会收敛到唯一稳态。")
-    )
-  })
-
-  output$metric_A <- renderUI({
-    req(rv$res)
-    div(class = "metric-card",
-        div(class = "metric-title", "策略 A 稳态期望年利润"),
-        div(class = "metric-value", sprintf("%.2f 万元", rv$res$exp_A)),
-        div(style = "margin-top:8px; font-size:13px; color:#5b7083;",
-            sprintf("稳态分布：%s", paste(sprintf("%s %.3f", rv$res$state_names, rv$res$ss_A), collapse = ", ")))
-    )
-  })
-
-  output$metric_B <- renderUI({
-    req(rv$res)
-    div(class = "metric-card",
-        div(class = "metric-title", "策略 B 稳态期望年利润"),
-        div(class = "metric-value", sprintf("%.2f 万元", rv$res$exp_B)),
-        div(style = "margin-top:8px; font-size:13px; color:#5b7083;",
-            sprintf("稳态分布：%s", paste(sprintf("%s %.3f", rv$res$state_names, rv$res$ss_B), collapse = ", ")))
-    )
-  })
-
-  output$prob_table <- renderDT({
-    req(rv$res)
-    df <- rbind(rv$res$prob_A, rv$res$prob_B)
-    df <- df[, c("策略", "时期", rv$res$state_names)]
-    datatable(df, options = list(pageLength = 12, searching = FALSE), rownames = FALSE) %>%
-      formatRound(columns = rv$res$state_names, digits = 4)
-  })
-
-  output$recommend <- renderUI({
-    req(rv$res)
-    better <- if (rv$res$exp_A >= rv$res$exp_B) "A" else "B"
-    any_absorb <- !is.null(rv$res$abs_A) || !is.null(rv$res$abs_B)
-    div(class = "info-box",
-        h4("推荐结果"),
-        p(sprintf("若两策略对应的马尔可夫链均不可约且非周期，则状态分布会收敛到唯一稳态；从稳态期望年利润看，策略 %s 更优（%.2f vs %.2f 万元）。",
-                  better, max(rv$res$exp_A, rv$res$exp_B), min(rv$res$exp_A, rv$res$exp_B))),
-        p(if (any_absorb) "检测到吸收状态：吸收链不存在唯一稳态，应参考“吸收链分析”标签页。" else "未检测到吸收状态，但周期链或多个闭类仍可能导致稳态不唯一或震荡。"),
-        p("若经营期限较短，应结合“图形分析”中 n 步状态概率演化综合判断。")
-    )
-  })
-
-  output$absorb_summary <- renderUI({
-    req(rv$res)
-    has_A <- !is.null(rv$res$abs_A)
-    has_B <- !is.null(rv$res$abs_B)
-    if (!has_A && !has_B) {
-      return(div(class = "info-box", p("当前两个策略均未检测到吸收状态，因此不属于吸收马尔可夫链。")))
-    }
-    txt <- paste(
-      if (has_A) "策略 A 检测到吸收状态。" else "策略 A 未检测到吸收状态。",
-      if (has_B) "策略 B 检测到吸收状态。" else "策略 B 未检测到吸收状态。"
-    )
-    div(class = "info-box", p(strong(txt)),
-        p("吸收链基本公式：N = (I - Q)^{-1}，B = N·R，t = N·1，其中 Q 为非吸收状态之间的转移子矩阵，R 为非吸收状态到吸收状态的转移子矩阵。"))
-  })
-
-  output$absorb_tables <- renderUI({
-    req(rv$res)
-    out <- tagList()
-    for (pol in c("A", "B")) {
-      abs_info <- rv$res[[paste0("abs_", pol)]]
-      if (!is.null(abs_info)) {
-        if (isTRUE(abs_info$singular)) {
-          out <- tagList(out, h4(sprintf("策略 %s 吸收链分析", pol)),
-                         div(class = "warning-box",
-                             p(sprintf("策略 %s 虽检测到吸收状态，但 (I - Q) 不可逆，无法计算基本矩阵 N。请检查转移矩阵是否正确。", pol))))
-          next
+  output$pi0_hot <- renderRHandsontable({
+    req(rv$pi0_df)
+    rhandsontable(
+      rv$pi0_df,
+      rowHeaders = rownames(rv$pi0_df),
+      stretchH = "all",
+      height = 120,
+      contextMenu = TRUE
+    ) %>%
+      hot_table(manualColumnResize = TRUE) %>%
+      hot_cols(type = "numeric", format = "0.00") %>%
+      hot_cols(renderer = "
+        function (instance, td, row, col, prop, value, cellProperties) {
+          Handsontable.renderers.NumericRenderer.apply(this, arguments);
+          td.style.textAlign = 'center';
         }
-        sn <- rv$res$state_names
-        nonabs_names <- sn[abs_info$nonabs]
-        abs_names <- sn[abs_info$absorb]
-
-        N_df <- as.data.frame(round(abs_info$N, 4))
-        colnames(N_df) <- nonabs_names
-        rownames(N_df) <- nonabs_names
-        N_df$状态 <- nonabs_names
-        N_df <- N_df[, c("状态", nonabs_names)]
-
-        B_df <- as.data.frame(round(abs_info$B, 4))
-        colnames(B_df) <- abs_names
-        rownames(B_df) <- nonabs_names
-        B_df$状态 <- nonabs_names
-        B_df <- B_df[, c("状态", abs_names)]
-
-        t_df <- data.frame(
-          状态 = nonabs_names,
-          期望吸收时间 = round(abs_info$t, 4),
-          stringsAsFactors = FALSE
-        )
-
-        out <- tagList(
-          out,
-          h4(sprintf("策略 %s 吸收链分析", pol)),
-          div(class = "info-box",
-              h5("基本矩阵 N = (I - Q)^{-1}"),
-              DTOutput(paste0("N_table_", pol))
-          ),
-          div(class = "info-box",
-              h5("吸收概率 B = N·R"),
-              DTOutput(paste0("B_table_", pol))
-          ),
-          div(class = "info-box",
-              h5("期望吸收时间 t = N·1"),
-              DTOutput(paste0("t_table_", pol))
-          )
-        )
-      }
-    }
-    out
+      ")
   })
 
-  # 为吸收链表格动态注册输出（利用局部变量在 observe 内）
-  observe({
-    req(rv$res)
-    for (pol in c("A", "B")) {
-      abs_info <- rv$res[[paste0("abs_", pol)]]
-      if (!is.null(abs_info) && !isTRUE(abs_info$singular)) {
-        local({
-          p <- pol
-          ai <- abs_info
-          sn <- rv$res$state_names
-          nonabs_names <- sn[ai$nonabs]
-          abs_names <- sn[ai$absorb]
-
-          N_df <- as.data.frame(round(ai$N, 4))
-          colnames(N_df) <- nonabs_names
-          N_df$状态 <- nonabs_names
-          N_df <- N_df[, c("状态", nonabs_names)]
-
-          B_df <- as.data.frame(round(ai$B, 4))
-          colnames(B_df) <- abs_names
-          B_df$状态 <- nonabs_names
-          B_df <- B_df[, c("状态", abs_names)]
-
-          t_df <- data.frame(状态 = nonabs_names, 期望吸收时间 = round(ai$t, 4), stringsAsFactors = FALSE)
-
-          output[[paste0("N_table_", p)]] <- renderDT({
-            datatable(N_df, rownames = FALSE, options = list(dom = "t", paging = FALSE, ordering = FALSE))
-          })
-          output[[paste0("B_table_", p)]] <- renderDT({
-            datatable(B_df, rownames = FALSE, options = list(dom = "t", paging = FALSE, ordering = FALSE))
-          })
-          output[[paste0("t_table_", p)]] <- renderDT({
-            datatable(t_df, rownames = FALSE, options = list(dom = "t", paging = FALSE, ordering = FALSE))
-          })
-        })
-      }
+  calc <- eventReactive(input$calculate, {
+    P_tbl <- hot_to_r(input$P_hot)
+    pi0_tbl <- hot_to_r(input$pi0_hot)
+    if (is.null(P_tbl) || is.null(pi0_tbl)) {
+      showNotification("请先生成并填写转移矩阵与初始分布。", type = "error")
+      return(NULL)
     }
+    P <- suppressWarnings(as.matrix(P_tbl))
+    pi0 <- suppressWarnings(as.numeric(pi0_tbl[1, ]))
+    rownames(P) <- rv$state_names
+    colnames(P) <- rv$state_names
+    names(pi0) <- rv$state_names
+
+    res <- tryCatch({
+      evol <- calc_markov_evolution(P, pi0, input$n_steps)
+      stat <- calc_markov_stationary(P)
+      abs_res <- calc_absorbing_chain(P)
+      list(evol = evol, stat = stat, abs = abs_res, P = P, pi0 = pi0)
+    }, error = function(e) {
+      showNotification(conditionMessage(e), type = "error")
+      NULL
+    })
+    rv$calc_res <- res
+    res
   })
 
-  output$trend_plot <- renderPlot({
-    req(rv$res)
-    df <- rbind(rv$res$prob_A, rv$res$prob_B)
-    df_long <- pivot_longer(df, cols = all_of(rv$res$state_names), names_to = "状态", values_to = "概率")
-    ggplot(df_long, aes(x = 时期, y = 概率, color = 状态)) +
-      geom_line(size = 1) +
+  output$evolution_table <- renderDT({
+    req(calc())
+    df <- as.data.frame(round(calc()$evol, 4))
+    df$t <- 0:(nrow(df) - 1)
+    df <- df[, c("t", rv$state_names)]
+    datatable(df, rownames = FALSE,
+              options = list(dom = "t", paging = FALSE, ordering = FALSE, scrollX = TRUE),
+              caption = "状态概率 π_t = π_0 P^t 演化表")
+  })
+
+  output$evolution_plot <- renderPlot({
+    req(calc())
+    evol <- calc()$evol
+    df <- as.data.frame(evol)
+    df$t <- 0:(nrow(df) - 1)
+    df_long <- pivot_longer(df, cols = -t, names_to = "状态", values_to = "概率")
+    ggplot(df_long, aes(x = t, y = 概率, color = 状态)) +
+      geom_line(linewidth = 1.2) +
       geom_point(size = 2) +
-      facet_wrap(~策略) +
-      scale_y_continuous(limits = c(0, 1)) +
-      labs(title = "不同策略下状态概率演化", x = "时期", y = "概率") +
+      labs(x = "步数 t", y = "状态概率", title = "状态概率随时间演化") +
       theme_minimal(base_size = 14) +
       theme(legend.position = "bottom")
+  })
+
+  output$stationary_table <- renderDT({
+    req(calc())
+    stat <- calc()$stat
+    df <- data.frame(状态 = names(stat), 稳态概率 = round(stat, 4), stringsAsFactors = FALSE)
+    datatable(df, rownames = FALSE,
+              options = list(dom = "t", paging = FALSE, ordering = FALSE),
+              caption = "稳态分布 π = πP")
+  })
+
+  output$stationary_note <- renderUI({
+    req(calc())
+    stat <- calc()$stat
+    P <- calc()$P
+    check <- as.vector(stat %*% P)
+    diff <- max(abs(check - stat))
+    div(class = "info-box",
+        h4("稳态校验"),
+        p(sprintf("πP 与 π 的最大偏差为 %.6f（容差 1e-6）。", diff)),
+        p("注意：若链不是不可约或非周期的，稳态分布可能不唯一或不存在；此时本页面给出的是线性方程组的一个非负归一化解。"))
+  })
+
+  output$absorbing_ui <- renderUI({
+    req(calc())
+    res <- calc()$abs
+    if (!res$has_absorbing) {
+      return(div(class = "info-box", p(res$msg)))
+    }
+    if (!res$has_transient) {
+      return(div(class = "info-box", p(res$msg)))
+    }
+    tagList(
+      div(class = "info-box",
+          h4("吸收态与暂态"),
+          p(paste0("吸收态：", paste(res$absorbing_names, collapse = "，"))),
+          p(paste0("暂态：", paste(res$transient_names, collapse = "，")))),
+      div(class = "info-box",
+          h4("重排后的转移矩阵 [Q R; 0 I]"),
+          DTOutput("abs_P_reord_table")),
+      div(class = "info-box",
+          h4("基本矩阵 N = (I - Q)^{-1}"),
+          DTOutput("abs_N_table")),
+      div(class = "info-box",
+          h4("吸收概率 B = N R"),
+          DTOutput("abs_B_table")),
+      div(class = "info-box",
+          h4("期望吸收时间 t = N · 1"),
+          DTOutput("abs_t_table"))
+    )
+  })
+
+  output$abs_P_reord_table <- renderDT({
+    req(calc())
+    res <- calc()$abs
+    if (!res$has_absorbing || !res$has_transient) return(NULL)
+    df <- as.data.frame(round(res$P_reord, 4))
+    df$状态 <- c(res$transient_names, res$absorbing_names)
+    df <- df[, c("状态", c(res$transient_names, res$absorbing_names))]
+    datatable(df, rownames = FALSE, options = list(dom = "t", paging = FALSE, ordering = FALSE))
+  })
+
+  output$abs_N_table <- renderDT({
+    req(calc())
+    res <- calc()$abs
+    if (!res$has_absorbing || !res$has_transient) return(NULL)
+    df <- as.data.frame(round(res$N, 4))
+    df$暂态 <- rownames(res$N)
+    df <- df[, c("暂态", colnames(res$N))]
+    datatable(df, rownames = FALSE, options = list(dom = "t", paging = FALSE, ordering = FALSE))
+  })
+
+  output$abs_B_table <- renderDT({
+    req(calc())
+    res <- calc()$abs
+    if (!res$has_absorbing || !res$has_transient) return(NULL)
+    df <- as.data.frame(round(res$B, 4))
+    df$暂态 <- rownames(res$B)
+    df <- df[, c("暂态", colnames(res$B))]
+    datatable(df, rownames = FALSE, options = list(dom = "t", paging = FALSE, ordering = FALSE))
+  })
+
+  output$abs_t_table <- renderDT({
+    req(calc())
+    res <- calc()$abs
+    if (!res$has_absorbing || !res$has_transient) return(NULL)
+    df <- data.frame(暂态 = names(res$t), 期望吸收时间 = round(res$t, 4), stringsAsFactors = FALSE)
+    datatable(df, rownames = FALSE, options = list(dom = "t", paging = FALSE, ordering = FALSE))
+  })
+
+  self_test_res <- eventReactive(input$run_self_test, {
+    run_markov_self_tests()
+  })
+
+  output$self_test_table <- renderDT({
+    req(self_test_res())
+    df <- self_test_res()
+    df$是否通过 <- ifelse(df$是否通过,
+                          "<span class='pass'>通过</span>",
+                          "<span class='fail'>未通过</span>")
+    datatable(df, rownames = FALSE, escape = FALSE,
+              options = list(paging = FALSE, searching = FALSE, ordering = FALSE))
   })
 }
 
