@@ -22,13 +22,28 @@ calc_npv <- function(cashflows, rate) {
 
 # 比较两个互斥方案
 calc_npv_decision <- function(npv_A, npv_B, allow_no_invest = TRUE) {
-  if (allow_no_invest && max(npv_A, npv_B) <= 0) {
+  tol <- 1e-9
+  max_npv <- max(npv_A, npv_B)
+
+  if (allow_no_invest && max_npv < -tol) {
     list(best = "不投资", invest = "否",
-         explain = sprintf("方案 A NPV = %.4f 万元，方案 B NPV = %.4f 万元，两方案 NPV 均 ≤ 0。若允许放弃投资，选择“不投资”更优；若题目要求必须二选一，则选 NPV 较高者。", npv_A, npv_B))
-  } else if (npv_A > npv_B) {
+         explain = sprintf("方案 A NPV = %.4f 万元，方案 B NPV = %.4f 万元，两方案 NPV 均 < 0。若允许放弃投资，不投资严格更优；若题目要求必须二选一，则选 NPV 较高者。", npv_A, npv_B))
+  } else if (allow_no_invest && abs(max_npv) <= tol) {
+    # 最高 NPV 恰好为 0，与不投资无差异
+    if (abs(npv_A - npv_B) <= tol) {
+      list(best = "A/B 无差异（与不投资无差异）", invest = "是/否",
+           explain = sprintf("两个方案 NPV 均等于 0（A=%.4f，B=%.4f），与投资相比无差异；若必须选择，二者无差异。", npv_A, npv_B))
+    } else if (npv_A > npv_B) {
+      list(best = "A（与不投资无差异）", invest = "是/否",
+           explain = sprintf("方案 A 的 NPV 为 0，方案 B 的 NPV 为 %.4f 万元。方案 A 与不投资无差异，严格优于方案 B。", npv_B))
+    } else {
+      list(best = "B（与不投资无差异）", invest = "是/否",
+           explain = sprintf("方案 B 的 NPV 为 0，方案 A 的 NPV 为 %.4f 万元。方案 B 与不投资无差异，严格优于方案 A。", npv_A))
+    }
+  } else if (npv_A - npv_B > tol) {
     list(best = "A", invest = "是",
          explain = sprintf("方案 A 的 NPV（%.4f 万元）高于方案 B（%.4f 万元），推荐投资方案 A。", npv_A, npv_B))
-  } else if (npv_B > npv_A) {
+  } else if (npv_B - npv_A > tol) {
     list(best = "B", invest = "是",
          explain = sprintf("方案 B 的 NPV（%.4f 万元）高于方案 A（%.4f 万元），推荐投资方案 B。", npv_B, npv_A))
   } else {
@@ -239,7 +254,7 @@ ui <- fluidPage(
                        tags$li("理解净现值 $$NPV=\\sum_{t=0}^{T}\\frac{CF_t}{(1+r)^t}$$ 的经济含义与计算方法；"),
                        tags$li("明确第 0 年初始投资不折现，后续年度现金流按复利折现；"),
                        tags$li("比较不同折现率下互斥投资方案的优劣，并识别临界折现率；"),
-                       tags$li("当两个方案 NPV 均为负时，能够判断“不投资”更优。")
+                       tags$li("当两个方案 NPV 均为负时，能够判断“不投资”严格更优；当最高 NPV 为 0 时，能够判断与投资无差异。")
                      ),
                      tags$hr(),
                      h4("默认现金流"),
@@ -476,12 +491,12 @@ server <- function(input, output, session) {
     req(calc())
     cross_rates <- find_crossover_rates(calc()$flows_A, calc()$flows_B, seq(0, 0.30, 0.005))
     if (length(cross_rates) == 0) {
-      div(class = "info-box", p("在 0%~30% 范围内未找到两方案 NPV 相等的方案转换点（除 r=0 外），说明在此区间内某一方案始终占优。复杂现金流下可能存在多个转换点，图中仅标出搜索范围内的交点。"))
+      div(class = "info-box", p("在 0%~30% 范围内不存在两方案 NPV 相等的方案转换点，说明在此区间内某一方案始终占优。临界折现率只是两方案相对优势的转换点，不是项目是否值得投资的绝对阈值。"))
     } else {
       div(class = "info-box",
           p(sprintf("在 0%%~30%% 范围内，两方案 NPV 相等的方案转换点（临界折现率）为：%s。",
                     paste(sprintf("%.2f%%", cross_rates * 100), collapse = ", "))),
-          p("方案转换点左侧与右侧可能对应不同的最优方案；若现金流更复杂，也可能存在多个转换点。教学中可据此讨论折现率敏感度。")
+          p("临界折现率是两方案相对优势的转换点，不是项目是否值得投资的绝对阈值。若某交点处两个方案 NPV 均为负，在允许不投资时仍应选择不投资。若现金流更复杂，也可能存在多个转换点。")
       )
     }
   })

@@ -313,7 +313,7 @@ ui <- fluidPage(
       h4("矩阵维度"),
       numericInput("n_actions", "方案数量", value = 3, min = 2, max = 20),
       numericInput("n_states", "自然状态数量", value = 3, min = 2, max = 20),
-      actionButton("generate", "生成/重置矩阵", class = "btn-primary"),
+      actionButton("generate", "生成/重置收益/成本矩阵", class = "btn-primary"),
       actionButton("reset_default", "恢复教材默认值", class = "btn-warning"),
 
       tags$hr(),
@@ -361,7 +361,8 @@ ui <- fluidPage(
               tags$li("区分收益型与成本型各准则的优化方向，避免方向错误；"),
               tags$li("理解 Hurwicz 乐观系数 alpha 的含义与边界行为；"),
               tags$li("正确构造后悔值矩阵并应用 Savage 准则；"),
-              tags$li("识别并列最优，避免只返回单个方案造成误导。")
+              tags$li("识别并列最优，避免只返回单个方案造成误导。"),
+              tags$li("注意：若某个方案在所有自然状态下都严格优于其他方案，则各准则很可能给出相同推荐，这是由数据本身的严格优势导致的，而非准则失效。")
             )
           )
         ),
@@ -383,12 +384,13 @@ ui <- fluidPage(
           div(
             class = "info-box",
             h4("各准则决策结果"),
+            helpText("Minimax Regret 始终越小越好；除后悔值准则外，收益型评价值越大越好，成本型评价值越小越好。"),
             DTOutput("summary_table")
           ),
           div(
             class = "info-box",
             h4("后悔值矩阵"),
-            helpText("收益型：后悔值 = 该状态下最大收益 - 所选方案收益；成本型：后悔值 = 所选方案成本 - 该状态下最小成本。"),
+            helpText("收益型 regret_{ij} = max_i(x_{ij}) - x_{ij}；成本型 regret_{ij} = c_{ij} - min_i(c_{ij})。Savage 准则选择最大后悔值最小的方案，因此最大后悔值越小越好。"),
             DTOutput("regret_table")
           ),
           br(),

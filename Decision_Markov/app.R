@@ -48,6 +48,18 @@ validate_initial_distribution <- function(pi0, n) {
   list(ok = TRUE, msg = "")
 }
 
+validate_profit_matrix <- function(G, P, name = "利润矩阵") {
+  G <- as.matrix(G)
+  P <- as.matrix(P)
+  if (nrow(G) != nrow(P) || ncol(G) != ncol(P)) {
+    return(list(ok = FALSE, msg = sprintf("%s 必须与转移矩阵同型（%d × %d），请检查输入。", name, nrow(P), ncol(P))))
+  }
+  if (any(is.na(G))) {
+    return(list(ok = FALSE, msg = sprintf("%s 存在缺失值，请检查输入。", name)))
+  }
+  list(ok = TRUE, msg = "")
+}
+
 mat_power <- function(M, k) {
   if (k == 0) return(diag(nrow(M)))
   if (k == 1) return(M)
@@ -87,13 +99,49 @@ calc_markov_stationary <- function(P) {
   b <- c(rep(0, n), 1)
   S <- tryCatch(qr.solve(A, b), error = function(e) rep(NA_real_, n))
   if (any(is.na(S))) {
-    stop("稳态分布求解失败，可能是转移矩阵奇异或链不满足不可约/非周期条件。请检查输入。")
+    stop("稳态分布求解失败，可能是转移矩阵奇异。请检查输入。")
   }
   # 保证非负并归一化
   S <- pmax(S, 0)
   S <- S / sum(S)
   names(S) <- colnames(P)
   S
+}
+
+# 计算期望利润：一期、累计与稳态
+calc_markov_profits <- function(P, G, pi0, n_steps, stationary = NULL) {
+  v <- validate_transition_matrix(P, "转移矩阵")
+  if (!v$ok) stop(v$msg)
+  vg <- validate_profit_matrix(G, P, "利润/成本矩阵")
+  if (!vg$ok) stop(vg$msg)
+  v2 <- validate_initial_distribution(pi0, nrow(P))
+  if (!v2$ok) stop(v2$msg)
+
+  P <- as.matrix(P)
+  G <- as.matrix(G)
+  pi0 <- as.vector(pi0)
+
+  # 给定当前状态 i，一步期望利润/成本 = Σ_j P[i,j] * G[i,j]
+  g_bar <- as.vector(rowSums(P * G))
+  names(g_bar) <- colnames(P)
+
+  # 各期状态分布
+  pi_list <- lapply(0:n_steps, function(k) as.vector(pi0 %*% mat_power(P, k)))
+  # 第 t 期的一步期望利润（从 t 到 t+1），t = 0, ..., n_steps-1
+  one_period <- vapply(pi_list[-length(pi_list)], function(pt) sum(pt * g_bar), numeric(1))
+  cumulative <- cumsum(one_period)
+
+  steady <- NULL
+  if (!is.null(stationary)) {
+    steady <- sum(stationary * g_bar)
+  }
+
+  list(
+    g_bar = g_bar,
+    one_period = one_period,
+    cumulative = cumulative,
+    steady_state = steady
+  )
 }
 
 # 吸收链分析
@@ -120,18 +168,18 @@ calc_absorbing_chain <- function(P) {
   P_reord <- P[ord, ord, drop = FALSE]
   m <- length(nonabs)
   Q <- P_reord[1:m, 1:m, drop = FALSE]
-  R <- P_reord[1:m, (m + 1):n, drop = FALSE]
+  R_abs <- P_reord[1:m, (m + 1):n, drop = FALSE]
 
   N <- tryCatch(solve(diag(m) - Q), error = function(e) NULL)
   if (is.null(N)) {
     stop("基本矩阵 (I - Q) 不可逆，无法完成吸收链分析。请检查转移矩阵。")
   }
-  B <- N %*% R
+  B <- N %*% R_abs
   t_vec <- as.vector(N %*% rep(1, m))
 
   rownames(Q) <- colnames(Q) <- state_names[nonabs]
-  rownames(R) <- state_names[nonabs]
-  colnames(R) <- state_names[absorbing]
+  rownames(R_abs) <- state_names[nonabs]
+  colnames(R_abs) <- state_names[absorbing]
   rownames(N) <- colnames(N) <- state_names[nonabs]
   rownames(B) <- state_names[nonabs]
   colnames(B) <- state_names[absorbing]
@@ -146,7 +194,7 @@ calc_absorbing_chain <- function(P) {
     transient_names = state_names[nonabs],
     P_reord = P_reord,
     Q = Q,
-    R = R,
+    R_abs = R_abs,
     N = N,
     B = B,
     t = t_vec
@@ -186,6 +234,24 @@ run_markov_self_tests <- function() {
     失败提示 = if (passed_stat) "" else "稳态分布应满足 π=πP 且元素和为 1。"
   )
 
+  # 期望利润公式测试
+  G <- matrix(c(10, -5, 2, 8), nrow = 2, byrow = TRUE,
+              dimnames = list(c("S1", "S2"), c("S1", "S2")))
+  prof <- calc_markov_profits(P, G, pi0, 2, stat)
+  g_bar <- rowSums(P * G)
+  expected_op0 <- sum(pi0 * g_bar)
+  passed_prof <- abs(prof$one_period[1] - expected_op0) < 1e-6 &&
+    abs(prof$steady_state - sum(stat * g_bar)) < 1e-6
+  tests[[length(tests) + 1]] <- list(
+    测试名称 = "一期与稳态期望利润公式",
+    实际输出 = paste0("第0期一步期望利润=", round(prof$one_period[1], 4),
+                    "，稳态期望利润=", round(prof$steady_state, 4)),
+    标准答案 = paste0("第0期一步期望利润=", round(expected_op0, 4),
+                    "，稳态期望利润=", round(sum(stat * g_bar), 4)),
+    是否通过 = passed_prof,
+    失败提示 = if (passed_prof) "" else "一期期望利润应为 Σ_i Σ_j π_t[i]·P[i,j]·G[i,j]；稳态期望利润 = Σ_i π_i·g_bar_i。"
+  )
+
   P_abs <- matrix(c(1, 0, 0,
                     0.2, 0.6, 0.2,
                     0, 0, 1),
@@ -198,13 +264,13 @@ run_markov_self_tests <- function() {
     all(abs(abs_res$t - 2.5) < 1e-6) &&
     all(abs(abs_res$B - matrix(c(0.5, 0.5), nrow = 1)) < 1e-6)
   tests[[length(tests) + 1]] <- list(
-    测试名称 = "吸收链 Q/R/N/B/t",
+    测试名称 = "吸收链 Q/R_abs/N/B/t",
     实际输出 = paste0("吸收态=", paste(abs_res$absorbing_names, collapse = ","),
                     "; t=", paste(round(abs_res$t, 4), collapse = ", "),
                     "; B=", paste(round(abs_res$B, 4), collapse = ", ")),
     标准答案 = "吸收态=A,C; t=2.5; B=0.5,0.5",
     是否通过 = passed_abs,
-    失败提示 = if (passed_abs) "" else "请检查吸收态判定、状态重排后 Q/R 提取及 N=(I-Q)^{-1}、B=NR、t=N·1 的计算。"
+    失败提示 = if (passed_abs) "" else "请检查吸收态判定、状态重排后 Q/R_abs 提取及 N=(I-Q)^{-1}、B=NR_abs、t=N·1 的计算。"
   )
 
   err_cases <- list(
@@ -246,6 +312,14 @@ default_P <- matrix(
   dimnames = list(default_state_names, default_state_names)
 )
 default_pi0 <- c(1, 0, 0)
+# 默认利润矩阵：G[i,j] 表示从状态 i 转移到状态 j 的一步利润（成本可填负值）
+default_G <- matrix(
+  c(10, 5, -2,
+    4, 8, 1,
+    -1, 3, 6),
+  nrow = 3, byrow = TRUE,
+  dimnames = list(default_state_names, default_state_names)
+)
 
 # =========================
 # UI
@@ -287,7 +361,7 @@ ui <- fluidPage(
     "))
   ),
 
-  titlePanel(div(class = "title-main", "马尔可夫链教学网页：状态演化、稳态与吸收链")),
+  titlePanel(div(class = "title-main", "马尔可夫链教学网页：状态演化、稳态、期望利润与吸收链")),
 
   div(
     class = "copyright-box",
@@ -314,7 +388,7 @@ ui <- fluidPage(
       tags$hr(),
 
       h4("操作"),
-      actionButton("calculate", "计算演化 / 稳态 / 吸收链", class = "btn-success"),
+      actionButton("calculate", "计算演化 / 稳态 / 期望利润 / 吸收链", class = "btn-success"),
       tags$hr(),
 
       checkboxInput("teacher_mode", "显示教师自测区域", value = FALSE),
@@ -323,6 +397,7 @@ ui <- fluidPage(
       helpText("输入说明："),
       tags$ul(
         tags$li("转移矩阵 P：行=当前状态，列=下一状态，每行之和必须等于 1。"),
+        tags$li("利润/成本矩阵 G：G[i,j] 表示从状态 i 转移到状态 j 的一步利润；成本可填负利润。"),
         tags$li("本页面采用行随机约定：π_{t+1} = π_t P。"),
         tags$li("初始分布：各状态在 t=0 的概率，非负且和等于 1。"),
         tags$li("吸收态：p_{ii}=1 且该行其余元素为 0。")
@@ -338,15 +413,17 @@ ui <- fluidPage(
           div(
             class = "info-box",
             h4("方法背景"),
-            p("马尔可夫链是一种无后效性的随机过程，未来状态只依赖于当前状态。本网页帮助理解状态概率演化、稳态分布以及吸收链分析。"),
+            p("马尔可夫链是一种无后效性的随机过程，未来状态只依赖于当前状态。本网页帮助理解状态概率演化、稳态分布、单期与累计期望利润以及吸收链分析。"),
             tags$details(
               tags$summary("查看计算说明"),
               br(),
               tags$ul(
                 tags$li("行随机约定：π_{t+1} = π_t P，即 P 的每一行之和为 1。"),
                 tags$li("n 步演化：π_t = π_0 P^t。"),
-                tags$li("稳态分布：满足 π = πP 且 ∑π_i = 1 的概率向量。不可约、非周期链存在唯一稳态分布。"),
-                tags$li("吸收链：将状态重排为（暂态，吸收态），P = [Q R; 0 I]，基本矩阵 N = (I - Q)^{-1}，吸收概率 B = NR，期望吸收时间 t = N·1。")
+                tags$li("稳态分布：满足 π = πP 且 ∑π_i = 1 的概率向量。有限状态马尔可夫链至少存在一个稳态分布；若链不可约，则稳态分布唯一；若进一步非周期，则从任意初始分布出发的状态分布会收敛到该唯一稳态分布。"),
+                tags$li("一期期望利润：E[profit_t] = Σ_i Σ_j π_t[i] · P[i,j] · G[i,j] = Σ_i π_t[i] · g_i，其中 g_i = Σ_j P[i,j]·G[i,j]。"),
+                tags$li("n 期累计期望利润 = Σ_{t=0}^{n-1} E[profit_t]，不等于稳态期望利润的 n 倍。"),
+                tags$li("吸收链：将状态重排为（暂态，吸收态），P = [Q R_abs; 0 I]，基本矩阵 N = (I - Q)^{-1}，吸收概率 B = N R_abs，期望吸收时间 t = N·1。")
               )
             ),
             tags$hr(),
@@ -354,8 +431,9 @@ ui <- fluidPage(
             tags$ul(
               tags$li("掌握行随机转移矩阵的构造与校验；"),
               tags$li("能够计算多步状态概率演化；"),
-              tags$li("理解稳态分布的求解条件与计算方法；"),
-              tags$li("掌握吸收链中 Q、R、N、B、t 的经济/物理含义。")
+              tags$li("理解稳态分布的存在性、唯一性与收敛性之间的关系；"),
+              tags$li("掌握单期与累计期望利润的区别与计算；"),
+              tags$li("掌握吸收链中 Q、R_abs、N、B、t 的经济/物理含义。")
             )
           )
         ),
@@ -374,6 +452,12 @@ ui <- fluidPage(
             h4("初始分布 π_0"),
             helpText("t=0 时各状态的概率，非负且和等于 1。"),
             rHandsontableOutput("pi0_hot")
+          ),
+          div(
+            class = "info-box",
+            h4("利润/成本矩阵 G"),
+            helpText("G[i,j] 表示从状态 i 转移到状态 j 的一步利润；若研究成本，可填负利润。"),
+            rHandsontableOutput("G_hot")
           )
         ),
 
@@ -402,6 +486,23 @@ ui <- fluidPage(
           ),
           br(),
           uiOutput("stationary_note")
+        ),
+
+        tabPanel(
+          "期望利润",
+          br(),
+          div(
+            class = "info-box",
+            h4("单期与累计期望利润"),
+            DTOutput("profit_table")
+          ),
+          div(
+            class = "info-box",
+            h4("稳态期望利润"),
+            uiOutput("steady_profit_box")
+          ),
+          br(),
+          uiOutput("profit_explain")
         ),
 
         tabPanel(
@@ -439,6 +540,7 @@ server <- function(input, output, session) {
   rv <- reactiveValues(
     P_df = as.data.frame(default_P),
     pi0_df = as.data.frame(matrix(default_pi0, nrow = 1)),
+    G_df = as.data.frame(default_G),
     state_names = default_state_names,
     n_states = default_n_states,
     calc_res = NULL
@@ -449,6 +551,8 @@ server <- function(input, output, session) {
     rownames(rv$P_df) <- rv$state_names
     colnames(rv$pi0_df) <- rv$state_names
     rownames(rv$pi0_df) <- "概率"
+    colnames(rv$G_df) <- rv$state_names
+    rownames(rv$G_df) <- rv$state_names
   })
 
   observeEvent(input$generate, {
@@ -457,10 +561,13 @@ server <- function(input, output, session) {
     rv$state_names <- paste0("状态", seq_len(n))
     rv$P_df <- as.data.frame(diag(n))
     rv$pi0_df <- as.data.frame(matrix(c(1, rep(0, n - 1)), nrow = 1))
+    rv$G_df <- as.data.frame(matrix(0, nrow = n, ncol = n))
     colnames(rv$P_df) <- rv$state_names
     rownames(rv$P_df) <- rv$state_names
     colnames(rv$pi0_df) <- rv$state_names
     rownames(rv$pi0_df) <- "概率"
+    colnames(rv$G_df) <- rv$state_names
+    rownames(rv$G_df) <- rv$state_names
     rv$calc_res <- NULL
   })
 
@@ -469,10 +576,13 @@ server <- function(input, output, session) {
     rv$state_names <- default_state_names
     rv$P_df <- as.data.frame(default_P)
     rv$pi0_df <- as.data.frame(matrix(default_pi0, nrow = 1))
+    rv$G_df <- as.data.frame(default_G)
     colnames(rv$P_df) <- rv$state_names
     rownames(rv$P_df) <- rv$state_names
     colnames(rv$pi0_df) <- rv$state_names
     rownames(rv$pi0_df) <- "概率"
+    colnames(rv$G_df) <- rv$state_names
+    rownames(rv$G_df) <- rv$state_names
     updateNumericInput(session, "n_states", value = default_n_states)
     updateNumericInput(session, "n_steps", value = 10)
     rv$calc_res <- NULL
@@ -516,24 +626,48 @@ server <- function(input, output, session) {
       ")
   })
 
+  output$G_hot <- renderRHandsontable({
+    req(rv$G_df)
+    rhandsontable(
+      rv$G_df,
+      rowHeaders = rownames(rv$G_df),
+      stretchH = "all",
+      height = 320,
+      contextMenu = TRUE
+    ) %>%
+      hot_table(manualColumnResize = TRUE) %>%
+      hot_cols(type = "numeric", format = "0") %>%
+      hot_cols(renderer = "
+        function (instance, td, row, col, prop, value, cellProperties) {
+          Handsontable.renderers.NumericRenderer.apply(this, arguments);
+          td.style.textAlign = 'center';
+        }
+      ")
+  })
+
   calc <- eventReactive(input$calculate, {
     P_tbl <- hot_to_r(input$P_hot)
     pi0_tbl <- hot_to_r(input$pi0_hot)
-    if (is.null(P_tbl) || is.null(pi0_tbl)) {
-      showNotification("请先生成并填写转移矩阵与初始分布。", type = "error")
+    G_tbl <- hot_to_r(input$G_hot)
+    if (is.null(P_tbl) || is.null(pi0_tbl) || is.null(G_tbl)) {
+      showNotification("请先生成并填写转移矩阵、初始分布与利润矩阵。", type = "error")
       return(NULL)
     }
     P <- suppressWarnings(as.matrix(P_tbl))
     pi0 <- suppressWarnings(as.numeric(pi0_tbl[1, ]))
+    G <- suppressWarnings(as.matrix(G_tbl))
     rownames(P) <- rv$state_names
     colnames(P) <- rv$state_names
     names(pi0) <- rv$state_names
+    rownames(G) <- rv$state_names
+    colnames(G) <- rv$state_names
 
     res <- tryCatch({
       evol <- calc_markov_evolution(P, pi0, input$n_steps)
       stat <- calc_markov_stationary(P)
+      prof <- calc_markov_profits(P, G, pi0, input$n_steps, stat)
       abs_res <- calc_absorbing_chain(P)
-      list(evol = evol, stat = stat, abs = abs_res, P = P, pi0 = pi0)
+      list(evol = evol, stat = stat, prof = prof, abs = abs_res, P = P, pi0 = pi0, G = G)
     }, error = function(e) {
       showNotification(conditionMessage(e), type = "error")
       NULL
@@ -582,9 +716,45 @@ server <- function(input, output, session) {
     check <- as.vector(stat %*% P)
     diff <- max(abs(check - stat))
     div(class = "info-box",
-        h4("稳态校验"),
+        h4("稳态校验与说明"),
         p(sprintf("πP 与 π 的最大偏差为 %.6f（容差 1e-6）。", diff)),
-        p("注意：若链不是不可约或非周期的，稳态分布可能不唯一或不存在；此时本页面给出的是线性方程组的一个非负归一化解。"))
+        p("对于有限状态马尔可夫链，稳态分布通常至少存在一个；不可约性主要保证唯一性，非周期性主要保证状态分布随时间收敛到该唯一稳态分布。吸收链也可能存在平稳分布：若有多个吸收态，平稳分布通常不唯一；若只有一个吸收态，长期分布通常集中于该吸收态。本页面给出的解是线性方程组 π=πP、Σπ=1 的一个非负归一化解。"))
+  })
+
+  output$profit_table <- renderDT({
+    req(calc())
+    prof <- calc()$prof
+    n <- length(prof$one_period)
+    df <- data.frame(
+      时期 = paste0("t=", 0:(n - 1), "→", 1:n),
+      状态分布 = sapply(0:(n - 1), function(k) paste(round(calc()$evol[k + 1, ], 3), collapse = ", ")),
+      一期期望利润 = round(prof$one_period, 4),
+      累计期望利润 = round(prof$cumulative, 4),
+      stringsAsFactors = FALSE
+    )
+    datatable(df, rownames = FALSE,
+              options = list(dom = "t", paging = FALSE, ordering = FALSE, scrollX = TRUE),
+              caption = "单期与累计期望利润（n 期累计 = 各期一期期望利润之和）")
+  })
+
+  output$steady_profit_box <- renderUI({
+    req(calc())
+    prof <- calc()$prof
+    div(class = "formula-box",
+        HTML(paste0(
+          "稳态期望利润（每期）= Σ_i π_i · g_i，其中 g_i = Σ_j P[i,j]·G[i,j]<br/>",
+          "= <b>", round(prof$steady_state, 4), "</b><br/><br/>",
+          "注意：稳态期望利润是长期平均每期利润，不等于 n 期累计利润。"
+        )))
+  })
+
+  output$profit_explain <- renderUI({
+    req(calc())
+    prof <- calc()$prof
+    div(class = "info-box",
+        h4("利润计算说明"),
+        p("一期期望利润严格按公式 E[profit_t] = Σ_i Σ_j π_t[i]·P[i,j]·G[i,j] = Σ_i π_t[i]·g_i 计算，其中 g_i = Σ_j P[i,j]·G[i,j]。"),
+        p("n 期累计期望利润 = Σ_{t=0}^{n-1} E[profit_t]，不是稳态期望利润乘以 n。"))
   })
 
   output$absorbing_ui <- renderUI({
@@ -602,13 +772,13 @@ server <- function(input, output, session) {
           p(paste0("吸收态：", paste(res$absorbing_names, collapse = "，"))),
           p(paste0("暂态：", paste(res$transient_names, collapse = "，")))),
       div(class = "info-box",
-          h4("重排后的转移矩阵 [Q R; 0 I]"),
+          h4("重排后的转移矩阵 [Q R_abs; 0 I]"),
           DTOutput("abs_P_reord_table")),
       div(class = "info-box",
           h4("基本矩阵 N = (I - Q)^{-1}"),
           DTOutput("abs_N_table")),
       div(class = "info-box",
-          h4("吸收概率 B = N R"),
+          h4("吸收概率 B = N R_abs"),
           DTOutput("abs_B_table")),
       div(class = "info-box",
           h4("期望吸收时间 t = N · 1"),

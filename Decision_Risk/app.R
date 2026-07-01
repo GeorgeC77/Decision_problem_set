@@ -29,8 +29,8 @@ calc_risk_decision <- function(payoff_matrix, prob, type = c("benefit", "cost"))
   if (any(prob < 0)) {
     stop("概率存在负值，概率必须非负。")
   }
-  if (abs(sum(prob) - 1) > 1e-6) {
-    stop(sprintf("概率之和为 %.6f，必须严格等于 1，请修改输入。", sum(prob)))
+  if (abs(sum(prob) - 1) > 1e-8) {
+    stop(sprintf("概率之和为 %.8f，与 1 的偏差超过 1e-8，请修改输入。", sum(prob)))
   }
   if (any(payoff_matrix < 0) && type == "benefit") {
     # 收益型允许负收益，不报错；成本型允许正成本，也不报错
@@ -95,15 +95,29 @@ calc_bayesian_evsi <- function(payoff_matrix, prior, likelihood, type = c("benef
   sample_margin <- as.vector(prior %*% likelihood)
   names(sample_margin) <- signal_names
 
-  posterior <- sweep(likelihood * prior, 2, sample_margin, "/")
-  posterior <- apply(posterior, 2, function(x) {
-    s <- sum(x)
-    if (s == 0) x else x / s
-  })
+  posterior <- matrix(NA_real_, nrow = length(state_names), ncol = n_k)
   rownames(posterior) <- state_names
   colnames(posterior) <- signal_names
 
+  for (j in seq_len(n_k)) {
+    if (sample_margin[j] > 1e-12) {
+      posterior[, j] <- (likelihood[, j] * prior) / sample_margin[j]
+      # 归一化，防止数值误差
+      s <- sum(posterior[, j])
+      if (s > 0) posterior[, j] <- posterior[, j] / s
+    }
+  }
+
   post_decisions <- lapply(seq_len(n_k), function(j) {
+    if (sample_margin[j] <= 1e-12) {
+      return(data.frame(
+        信号 = signal_names[j],
+        边际概率 = round(sample_margin[j], 4),
+        最优方案 = "该信号发生概率为 0，无法计算后验概率",
+        最优期望指标 = NA_real_,
+        stringsAsFactors = FALSE
+      ))
+    }
     post_prob <- posterior[, j]
     exp_post <- payoff_matrix %*% post_prob
     if (type == "benefit") {
@@ -123,7 +137,9 @@ calc_bayesian_evsi <- function(payoff_matrix, prior, likelihood, type = c("benef
   })
   post_df <- do.call(rbind, post_decisions)
 
-  expected_posterior_value <- sum(sample_margin * post_df$最优期望指标)
+  # 仅边际概率大于 0 的信号参与期望后验指标计算
+  valid_idx <- sample_margin > 1e-12
+  expected_posterior_value <- sum(sample_margin[valid_idx] * post_df$最优期望指标[valid_idx], na.rm = TRUE)
   prior_res <- calc_risk_decision(payoff_matrix, prior, type)
   if (type == "benefit") {
     evsi <- expected_posterior_value - prior_res$best_val
@@ -134,6 +150,11 @@ calc_bayesian_evsi <- function(payoff_matrix, prior, likelihood, type = c("benef
     stop("EVSI 计算为负值，请检查输入数据。")
   }
   evsi <- max(evsi, 0)
+  # EVSI 理论上不超过 EVPI
+  evpi <- prior_res$evpi
+  if (evsi > evpi + 1e-8) {
+    evsi <- evpi
+  }
 
   list(posterior = posterior, post_df = post_df, evsi = evsi,
        expected_posterior_value = expected_posterior_value)
@@ -320,6 +341,10 @@ ui <- fluidPage(
       h4("操作"),
       actionButton("calculate", "计算决策结果", class = "btn-success"),
       tags$hr(),
+      h4("试销/调查成本"),
+      numericInput("sample_cost", "试销或调查成本 Cs（万元）", value = 0, min = 0, step = 1),
+      helpText("EVSI 是样本信息价值，尚未扣除试销成本。净样本信息价值 = EVSI - Cs，仅当该值 > 0 时试销在经济上才有利。"),
+      tags$hr(),
 
       checkboxInput("teacher_mode", "显示教师自测区域", value = FALSE),
 
@@ -327,8 +352,8 @@ ui <- fluidPage(
       helpText("输入说明："),
       tags$ul(
         tags$li("收益/成本矩阵：行=方案，列=自然状态，单位为万元。"),
-        tags$li("先验概率：各自然状态的概率，必须非负且和严格等于 1。"),
-        tags$li("似然矩阵：行=真实状态，列=试销结果/信号，每行之和必须严格等于 1。"),
+        tags$li("先验概率：各自然状态的概率，必须非负且和为 1（允许 1e-8 数值误差）。"),
+        tags$li("似然矩阵：行=真实状态，列=试销结果/信号，每行之和为 1（允许 1e-8 数值误差）。"),
         tags$li("若概率或行和不等于 1，页面会提示修改，不会自动归一化。"),
         tags$li("可直接在表格中编辑，支持复制粘贴。")
       )
@@ -343,7 +368,7 @@ ui <- fluidPage(
           div(
             class = "info-box",
             h4("问题背景"),
-            p("风险型决策是指决策者知道各自然状态出现的概率（或可估计概率），并据此计算期望指标进行决策。本网页以教材第三章“风险型决策分析”为背景，帮助理解期望准则、后悔值、完全情报价值（EVPI）与样本情报价值（EVSI）的计算与含义。"),
+            p("风险型决策是指决策者知道各自然状态出现的概率（或可估计概率），并据此计算期望指标进行决策。本网页以教材第三章“风险型决策分析”为背景，帮助理解期望准则、后悔值、完全信息价值（EVPI）与样本信息价值（EVSI）的计算与含义。"),
             tags$details(
               tags$summary("查看计算说明"),
               br(),
@@ -358,7 +383,7 @@ ui <- fluidPage(
             h4("核心教学目标"),
             tags$ul(
               tags$li("掌握收益型与成本型问题的期望准则：收益型最大化 EMV，成本型最小化 EC；"),
-              tags$li("理解完全情报价值 EVPI 的经济含义及其与最小期望机会损失（EOL）的关系；"),
+              tags$li("理解完全信息价值 EVPI 的经济含义及其与最小期望机会损失（EOL）的关系；"),
               tags$li("掌握贝叶斯公式，由先验概率与似然矩阵计算后验概率；"),
               tags$li("理解 EVSI 与抽样/试销决策的经济权衡。")
             ),
@@ -445,7 +470,7 @@ ui <- fluidPage(
             class = "info-box",
             h4("先验概率变化对最优方案的影响"),
             plotOutput("prior_sensitivity_plot", height = "380px"),
-            tags$p(class = "small-note", "横轴为第一个自然状态的先验概率；曲线表示各方案的期望收益/成本。")
+            tags$p(class = "small-note", "仅当自然状态数为 2 时绘制此图；横轴为第一个自然状态的先验概率，第二个状态概率为 1-p。若状态数大于 2，图中会给出说明。")
           ),
           div(
             class = "info-box",
@@ -621,8 +646,8 @@ server <- function(input, output, session) {
       showNotification("似然矩阵存在行和为 0 的行。", type = "error")
       return()
     }
-    if (any(abs(rs - 1) > 1e-6)) {
-      showNotification("似然矩阵某些行之和不等于 1，请修改输入。", type = "error")
+    if (any(abs(rs - 1) > 1e-8)) {
+      showNotification("似然矩阵某些行之和与 1 的偏差超过 1e-8，请修改输入。", type = "error")
       return()
     }
 
@@ -661,7 +686,7 @@ server <- function(input, output, session) {
       column(4, div(class = "metric-card",
                     div(class = "metric-title", "EVPI"),
                     div(class = "metric-value", sprintf("%.2f 万元", rv$res$evpi)),
-                    div(class = "metric-note", "完全情报价值")))
+                    div(class = "metric-note", "完全信息价值")))
     )
   })
 
@@ -705,17 +730,17 @@ server <- function(input, output, session) {
     res <- rv$res
     if (res$type == "benefit") {
       txt <- paste0(
-        "EVPI = 完全情报期望收益 - 先验最优期望收益<br/>",
+        "EVPI = 完全信息期望收益 - 先验最优期望收益<br/>",
         "= ", round(res$evwpi, 4), " - ", round(res$best_val, 4),
         " = <b>", round(res$evpi, 4), " 万元</b><br/><br/>",
-        "含义：为获得完全情报所愿支付的最高价格；若情报费用低于 EVPI，则获取情报有利。"
+        "含义：为获得完全信息所愿支付的最高价格；若信息费用低于 EVPI，则获取信息有利。"
       )
     } else {
       txt <- paste0(
-        "EVPI = 先验最优期望成本 - 完全情报期望成本<br/>",
+        "EVPI = 先验最优期望成本 - 完全信息期望成本<br/>",
         "= ", round(res$best_val, 4), " - ", round(res$ecwpi, 4),
         " = <b>", round(res$evpi, 4), " 万元</b><br/><br/>",
-        "含义：为获得完全情报所愿支付的最高价格；若情报费用低于 EVPI，则获取情报有利。"
+        "含义：为获得完全信息所愿支付的最高价格；若信息费用低于 EVPI，则获取信息有利。"
       )
     }
     div(class = "formula-box", HTML(txt))
@@ -756,12 +781,21 @@ server <- function(input, output, session) {
   output$evsi_box <- renderUI({
     req(rv$res)
     res <- rv$res
+    cs <- input$sample_cost
+    net_evsi <- res$evsi - cs
+    decision_txt <- if (net_evsi > 0) {
+      sprintf("净样本信息价值 EVSI - Cs = %.4f - %.4f = %.4f 万元 > 0，进行试销/调查在经济上值得。", res$evsi, cs, net_evsi)
+    } else {
+      sprintf("净样本信息价值 EVSI - Cs = %.4f - %.4f = %.4f 万元 ≤ 0，进行试销/调查在经济上不值得。", res$evsi, cs, net_evsi)
+    }
     div(class = "formula-box",
         HTML(paste0(
           "EVSI = |后验最优期望指标 - 先验最优期望指标|<br/>",
           "= |", round(res$expected_posterior_value, 4), " - ", round(res$best_val, 4),
           "| = <b>", round(res$evsi, 4), " 万元</b><br/><br/>",
-          "含义：若试销/调查费用低于 EVSI，则进行抽样在经济上是值得的。"
+          "试销/调查成本 Cs = ", cs, " 万元<br/>",
+          decision_txt, "<br/><br/>",
+          "注意：EVSI 是样本信息价值，尚未扣除试销成本；只有 EVSI > Cs 时试销才具有经济价值。"
         )))
   })
 
@@ -774,7 +808,7 @@ server <- function(input, output, session) {
     div(class = "info-box",
         h4("决策解释"),
         p(txt),
-        p(sprintf("EVSI = %.4f 万元。若试销费用低于该值，则进行试销有利。", res$evsi)))
+        p(sprintf("EVSI = %.4f 万元，试销成本 Cs = %.4f 万元。净样本信息价值 = %.4f 万元。", res$evsi, input$sample_cost, res$evsi - input$sample_cost)))
   })
 
   output$prior_sensitivity_plot <- renderPlot({
@@ -784,7 +818,7 @@ server <- function(input, output, session) {
     if (n_s != 2) {
       return(
         ggplot() + annotate("text", x = 0.5, y = 0.5,
-                            label = "仅当自然状态为 2 个时绘制此图") +
+                            label = "仅当自然状态为 2 个时绘制此图；\n状态数大于 2 时，其余状态概率需按比例调整。") +
           theme_void()
       )
     }
