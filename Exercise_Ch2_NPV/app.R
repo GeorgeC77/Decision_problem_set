@@ -83,7 +83,7 @@ ui <- fluidPage(
     class = "copyright-box",
     HTML("
     <b>版权声明：</b><br/>
-    《确定型决策分析教学网页：习题10 互斥投资方案 NPV 比较》应用程序 © 2026 中国石油大学（华东）崔耕，
+    本应用程序 © 2026 中国石油大学（华东）崔耕，
     采用 <b>CC BY-NC-SA 4.0</b>（署名—非商业性使用—相同方式共享 4.0 国际）许可协议授权。<br/>
     如发现任何程序缺陷或错误，请发送邮件至
     <a href='mailto:gengc25@hotmail.com'>gengc25@hotmail.com</a>。
@@ -94,8 +94,8 @@ ui <- fluidPage(
     sidebarPanel(
       width = 3,
       h4("折现率设置"),
-      numericInput("r1", "折现率 1 (%)", value = 10, min = 0, max = 100, step = 1),
-      numericInput("r2", "折现率 2 (%)", value = 20, min = 0, max = 100, step = 1),
+      numericInput("r1", "折现率 1 (%)", value = 10, min = -99, max = 100, step = 1),
+      numericInput("r2", "折现率 2 (%)", value = 20, min = -99, max = 100, step = 1),
       
       tags$hr(),
       h4("方案现金流"),
@@ -103,7 +103,7 @@ ui <- fluidPage(
           HTML("
             <b>现金流输入说明：</b><br/>
             1. <b>年份 0</b> 为初始投资，通常为负值，<b>不折现</b>；<br/>
-            2. 年份 1~6 为后续年度现金流，按 NPV = Σ CF<sub>t</sub>/(1+r)<sup>t</sup> 折现；<br/>
+            2. 年份 1~6 为后续年度现金流，按 $$NPV=\\sum_{t=0}^{T}\\frac{CF_t}{(1+r)^t}$$ 折现；<br/>
             3. 所有金额单位均为<b>万元</b>。
           ")
       ),
@@ -197,11 +197,21 @@ server <- function(input, output, session) {
   })
   
   calc <- eventReactive(input$calculate, {
+    # 折现率边界校验
+    if (input$r1 <= -100 || input$r2 <= -100) {
+      showNotification("折现率不能小于或等于 -100%，请重新输入。", type = "error")
+      return(NULL)
+    }
     r1 <- input$r1 / 100
     r2 <- input$r2 / 100
     
     flows_A <- rv$df_A$现金流_万元
     flows_B <- rv$df_B$现金流_万元
+    
+    if (any(is.na(flows_A)) || any(is.na(flows_B))) {
+      showNotification("现金流存在空值或非数值，请检查并补全。", type = "error")
+      return(NULL)
+    }
     
     npv_A1 <- npv(flows_A, r1)
     npv_A2 <- npv(flows_A, r2)
@@ -223,8 +233,8 @@ server <- function(input, output, session) {
              explain = sprintf("方案 B 的 NPV（%.2f 万元）高于方案 A（%.2f 万元），推荐投资方案 B。",
                                npv_B, npv_A))
       } else {
-        list(best = "A/B 等价", invest = "是",
-             explain = sprintf("两方案 NPV 相等（%.2f 万元），任选其一。", npv_A))
+        list(best = "A/B 无差异", invest = "是",
+             explain = sprintf("两个方案在该折现率下 NPV 相等（%.2f 万元），无差异。", npv_A))
       }
     }
     

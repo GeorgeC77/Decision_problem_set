@@ -17,8 +17,10 @@ validate_probs <- function(p, name = "概率") {
   if (any(is.na(p))) {
     return(list(valid = FALSE, msg = sprintf("%s 存在缺失或非数值，请检查输入。", name), p = p))
   }
+  msg <- NULL
   if (any(p < 0)) {
     p <- pmax(p, 0)
+    msg <- sprintf("%s 存在负值，已自动截断为 0 并重新归一化。", name)
   }
   s <- sum(p)
   if (s == 0) {
@@ -26,8 +28,9 @@ validate_probs <- function(p, name = "概率") {
   }
   if (abs(s - 1) > 1e-6) {
     p <- p / s
+    if (is.null(msg)) msg <- sprintf("%s 之和不等于 1，已自动归一化。", name)
   }
-  list(valid = TRUE, msg = NULL, p = p)
+  list(valid = TRUE, msg = msg, p = p)
 }
 
 # 转移/似然矩阵校验：非负、每行和为 1
@@ -36,6 +39,10 @@ validate_likelihood <- function(M, name = "似然矩阵") {
   if (any(is.na(M))) {
     return(list(valid = FALSE, msg = sprintf("%s 存在缺失或非数值。", name), M = M))
   }
+  msg <- NULL
+  if (any(M < 0)) {
+    msg <- sprintf("%s 存在负值，已自动截断为 0 并重新归一化。", name)
+  }
   M <- matrix(pmax(M, 0), nrow = sqrt(length(M)))
   rs <- rowSums(M)
   if (any(rs == 0)) {
@@ -43,8 +50,9 @@ validate_likelihood <- function(M, name = "似然矩阵") {
   }
   if (any(abs(rs - 1) > 1e-6)) {
     M <- M / rs
+    if (is.null(msg)) msg <- sprintf("%s 每行之和不等于 1，已自动归一化。", name)
   }
-  list(valid = TRUE, msg = NULL, M = M)
+  list(valid = TRUE, msg = msg, M = M)
 }
 
 # =========================
@@ -110,7 +118,7 @@ ui <- fluidPage(
     class = "copyright-box",
     HTML("
     <b>版权声明：</b><br/>
-    《风险型决策分析教学网页：期望收益与完全信息价值》应用程序 © 2026 中国石油大学（华东）崔耕，
+    本应用程序 © 2026 中国石油大学（华东）崔耕，
     采用 <b>CC BY-NC-SA 4.0</b>（署名—非商业性使用—相同方式共享 4.0 国际）许可协议授权。<br/>
     如发现任何程序缺陷或错误，请发送邮件至
     <a href='mailto:gengc25@hotmail.com'>gengc25@hotmail.com</a>。
@@ -452,7 +460,7 @@ server <- function(input, output, session) {
     sample_margin <- as.vector(prior %*% likelihood)
     names(sample_margin) <- signal_names
 
-    posterior <- sweep(likelihood, 2, sample_margin, "/")
+    posterior <- sweep(likelihood * prior, 2, sample_margin, "/")
     posterior <- apply(posterior, 2, function(x) {
       s <- sum(x)
       if (s == 0) x else x / s

@@ -159,7 +159,7 @@ ui <- fluidPage(
     class = "copyright-box",
     HTML("
     <b>版权声明：</b><br/>
-    《马尔可夫分析教学网页：状态转移、稳态分布与吸收链》应用程序 © 2026 中国石油大学（华东）崔耕，
+    本应用程序 © 2026 中国石油大学（华东）崔耕，
     采用 <b>CC BY-NC-SA 4.0</b>（署名—非商业性使用—相同方式共享 4.0 国际）许可协议授权。<br/>
     如发现任何程序缺陷或错误，请发送邮件至
     <a href='mailto:gengc25@hotmail.com'>gengc25@hotmail.com</a>。
