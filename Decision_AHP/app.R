@@ -131,13 +131,13 @@ ui <- fluidPage(
     "))
   ),
   
-  titlePanel(div(class = "title-main", "多目标决策分析教学网页：AHP 层次分析法")),
+  titlePanel(div(class = "title-main", "层次分析法教学网页：判断矩阵、权重计算与一致性检验")),
   
   div(
     class = "copyright-box",
     HTML("
     <b>版权声明：</b><br/>
-    《多目标决策分析教学网页：AHP 层次分析法》应用程序 © 2026 中国石油大学（华东）崔耕，
+    《层次分析法教学网页：判断矩阵、权重计算与一致性检验》应用程序 © 2026 中国石油大学（华东）崔耕，
     采用 <b>CC BY-NC-SA 4.0</b>（署名—非商业性使用—相同方式共享 4.0 国际）许可协议授权。<br/>
     如发现任何程序缺陷或错误，请发送邮件至
     <a href='mailto:gengc25@hotmail.com'>gengc25@hotmail.com</a>。
@@ -210,6 +210,12 @@ ui <- fluidPage(
           uiOutput("cr_warning"),
           br(),
           uiOutput("cr_cards"),
+          br(),
+          div(
+            class = "info-box",
+            h4("各判断矩阵一致性检验汇总"),
+            DTOutput("cr_detail_table")
+          ),
           br(),
           div(
             class = "info-box",
@@ -379,16 +385,15 @@ server <- function(input, output, session) {
   output$cr_warning <- renderUI({
     req(rv$criteria_res)
     cr <- rv$criteria_res$cr
-    if (is.na(cr) || cr >= 0.1) {
+    alt_crs <- sapply(rv$alt_res, function(x) x$res$cr)
+    any_fail <- is.na(cr) || cr >= 0.1 || any(!is.na(alt_crs) & alt_crs >= 0.1)
+    if (any_fail) {
       div(
         class = "warning-box",
-        HTML(sprintf(
-          "<b>一致性检验未通过：</b>准则层判断矩阵的 CR = %.4f ≥ 0.10。建议返回检查判断矩阵的逻辑一致性，调整后再重新计算。未通过一致性检验时，AHP 排序结果仅供参考。",
-          cr
-        ))
+        HTML("<b>一致性检验未全部通过：</b>部分判断矩阵的 CR ≥ 0.10。建议返回检查并调整相应矩阵。未通过一致性检验时，AHP 排序结果仅供参考。")
       )
     } else {
-      div(class = "info-box", p("准则层一致性检验通过（CR < 0.10），结果可信。"))
+      div(class = "info-box", p("所有判断矩阵一致性检验通过（CR < 0.10），结果可信。"))
     }
   })
   
@@ -450,19 +455,38 @@ server <- function(input, output, session) {
   
   output$total_rank_table <- renderDT({
     req(rv$total_rank)
-    # 若存在未通过一致性检验的方案矩阵，在表中附加标记
-    cr_warn <- sapply(rv$alt_res, function(x) {
-      !is.na(x$res$cr) && x$res$cr >= 0.1
-    })
-    any_warn <- any(cr_warn)
-    
-    dt <- datatable(
+    datatable(
       rv$total_rank,
       rownames = FALSE,
       options = list(dom = "t", paging = FALSE, ordering = FALSE),
-      caption = if (any_warn) "层次总排序（带 * 的准则判断矩阵未通过一致性检验，请检查）" else "层次总排序"
+      caption = "层次总排序"
     )
-    dt
+  })
+  
+  output$cr_detail_table <- renderDT({
+    req(rv$criteria_res, rv$alt_res)
+    rows <- data.frame(
+      矩阵 = "准则层",
+      λmax = round(rv$criteria_res$lambda, 4),
+      CI = round(rv$criteria_res$ci, 4),
+      CR = round(rv$criteria_res$cr, 4),
+      是否通过 = ifelse(rv$criteria_res$cr < 0.1, "是", "否"),
+      stringsAsFactors = FALSE
+    )
+    for (nm in names(rv$alt_res)) {
+      r <- rv$alt_res[[nm]]$res
+      rows <- rbind(rows, data.frame(
+        矩阵 = nm,
+        λmax = round(r$lambda, 4),
+        CI = round(r$ci, 4),
+        CR = round(r$cr, 4),
+        是否通过 = ifelse(r$cr < 0.1, "是", "否"),
+        stringsAsFactors = FALSE
+      ))
+    }
+    datatable(rows, rownames = FALSE,
+              options = list(dom = "t", paging = FALSE, ordering = FALSE),
+              caption = "各判断矩阵一致性检验（CR < 0.10 为通过）")
   })
   
   output$total_cr_box <- renderUI({

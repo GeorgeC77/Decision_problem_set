@@ -55,13 +55,13 @@ ui <- fluidPage(
     "))
   ),
   
-  titlePanel(div(class = "title-main", "不确定型与风险型决策分析教学网页：习题7 钟表公司设计方案")),
+  titlePanel(div(class = "title-main", "不确定型决策分析教学网页：乐观、悲观、Hurwicz、Laplace 与 Savage 准则")),
   
   div(
     class = "copyright-box",
     HTML("
     <b>版权声明：</b><br/>
-    《不确定型与风险型决策分析教学网页：习题7 钟表公司设计方案》应用程序 © 2026 中国石油大学（华东）崔耕，
+    《不确定型决策分析教学网页：乐观、悲观、Hurwicz、Laplace 与 Savage 准则》应用程序 © 2026 中国石油大学（华东）崔耕，
     采用 <b>CC BY-NC-SA 4.0</b>（署名—非商业性使用—相同方式共享 4.0 国际）许可协议授权。<br/>
     如发现任何程序缺陷或错误，请发送邮件至
     <a href='mailto:gengc25@hotmail.com'>gengc25@hotmail.com</a>。
@@ -381,7 +381,7 @@ server <- function(input, output, session) {
         check.names = FALSE
       )
     } else {
-      # 成本型：乐观=最小成本，悲观=最大成本
+      # 成本型：乐观=最小成本（Minimin），悲观=最大成本（Minimax）
       minimin <- apply(payoff, 1, min)
       minimax_cost <- apply(payoff, 1, max)
       laplace <- rowMeans(payoff)
@@ -394,8 +394,8 @@ server <- function(input, output, session) {
       
       rv$result_df <- data.frame(
         决策方案 = rownames(payoff),
-        Maximax_乐观 = round(minimin, 4),
-        Maximin_悲观 = round(minimax_cost, 4),
+        Minimin_乐观 = round(minimin, 4),
+        Minimax_悲观 = round(minimax_cost, 4),
         Laplace_等概率 = round(laplace, 4),
         MinimaxRegret_最小最大后悔 = round(apply(regret, 1, max), 4),
         Hurwicz_折中 = round(hurwicz, 4),
@@ -444,7 +444,7 @@ server <- function(input, output, session) {
           p(strong("当前为收益型问题。"), "各准则目标为收益最大化：Maximax、Maximin、Laplace、Hurwicz 越大越好；Minimax Regret 越小越好。"))
     } else {
       div(class = "info-box",
-          p(strong("当前为成本型问题。"), "各准则目标为成本最小化：Maximax（乐观）= 各方案最小成本中的最小值，Maximin（悲观）= 各方案最大成本中的最小值；Laplace、Hurwicz 越小越好；Minimax Regret 越小越好。"))
+          p(strong("当前为成本型问题。"), "各准则目标为成本最小化：Minimin（乐观）= 各方案最小成本中的最小值，Minimax（悲观）= 各方案最大成本中的最小值；Laplace、Hurwicz 越小越好；Minimax Regret 越小越好。"))
     }
   })
   
@@ -463,36 +463,43 @@ server <- function(input, output, session) {
     df <- rv$result_df
     is_benefit <- rv$is_benefit
     
-    best_maximax <- df$决策方案[which.min(df$Maximax_乐观)]  # 成本型：乐观准则取最小值
-    if (is_benefit) best_maximax <- df$决策方案[which.max(df$Maximax_乐观)]
+    pick_best <- function(values, maximize) {
+      if (maximize) {
+        idx <- which(abs(values - max(values)) < 1e-9)
+      } else {
+        idx <- which(abs(values - min(values)) < 1e-9)
+      }
+      paste(df$决策方案[idx], collapse = ", ")
+    }
     
-    best_maximin <- df$决策方案[which.max(df$Maximin_悲观)]  # 成本型：悲观准则取最大值中的最小
-    if (is_benefit) best_maximin <- df$决策方案[which.max(df$Maximin_悲观)]
-    
-    best_laplace <- df$决策方案[which.min(df$Laplace_等概率)]
-    if (is_benefit) best_laplace <- df$决策方案[which.max(df$Laplace_等概率)]
-    
-    best_minimax_regret <- df$决策方案[which.min(df$MinimaxRegret_最小最大后悔)]
-    
-    best_hurwicz <- df$决策方案[which.min(df$Hurwicz_折中)]
-    if (is_benefit) best_hurwicz <- df$决策方案[which.max(df$Hurwicz_折中)]
+    if (is_benefit) {
+      best_maximax <- pick_best(df$Maximax_乐观, TRUE)
+      best_maximin <- pick_best(df$Maximin_悲观, TRUE)
+      best_laplace <- pick_best(df$Laplace_等概率, TRUE)
+      best_hurwicz <- pick_best(df$Hurwicz_折中, TRUE)
+    } else {
+      best_maximax <- pick_best(df$Minimin_乐观, FALSE)
+      best_maximin <- pick_best(df$Minimax_悲观, FALSE)
+      best_laplace <- pick_best(df$Laplace_等概率, FALSE)
+      best_hurwicz <- pick_best(df$Hurwicz_折中, FALSE)
+    }
+    best_minimax_regret <- pick_best(df$MinimaxRegret_最小最大后悔, FALSE)
     
     best_risk <- if (!is.null(rv$risk_df)) {
-      if (is_benefit) {
-        rv$risk_df$决策方案[which.max(rv$risk_df$期望值)]
-      } else {
-        rv$risk_df$决策方案[which.min(rv$risk_df$期望值)]
-      }
+      if (is_benefit) pick_best(rv$risk_df$期望值, TRUE) else pick_best(rv$risk_df$期望值, FALSE)
     } else {
       "（未输入有效概率）"
     }
+    
+    maximax_label <- if (is_benefit) "Maximax（乐观准则）" else "Minimin（乐观准则）"
+    maximin_label <- if (is_benefit) "Maximin（悲观准则）" else "Minimax（悲观准则）"
     
     div(
       class = "info-box",
       h4("推荐方案汇总"),
       tags$ul(
-        tags$li(sprintf("Maximax（乐观准则）推荐：%s", best_maximax)),
-        tags$li(sprintf("Maximin（悲观准则）推荐：%s", best_maximin)),
+        tags$li(sprintf("%s推荐：%s", maximax_label, best_maximax)),
+        tags$li(sprintf("%s推荐：%s", maximin_label, best_maximin)),
         tags$li(sprintf("Laplace（等概率准则）推荐：%s", best_laplace)),
         tags$li(sprintf("Minimax Regret（最小最大遗憾）推荐：%s", best_minimax_regret)),
         tags$li(sprintf("Hurwicz（折中准则，α=%.2f）推荐：%s", input$alpha, best_hurwicz)),

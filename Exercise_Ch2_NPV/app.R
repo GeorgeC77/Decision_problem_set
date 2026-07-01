@@ -77,7 +77,7 @@ ui <- fluidPage(
     "))
   ),
   
-  titlePanel(div(class = "title-main", "确定型决策分析教学网页：习题10 互斥投资方案 NPV 比较")),
+  titlePanel(div(class = "title-main", withMathJax("确定型决策分析教学网页：习题10 互斥投资方案 NPV 比较"))),
   
   div(
     class = "copyright-box",
@@ -104,7 +104,7 @@ ui <- fluidPage(
             <b>现金流输入说明：</b><br/>
             1. <b>年份 0</b> 为初始投资，通常为负值，<b>不折现</b>；<br/>
             2. 年份 1~6 为后续年度现金流，按 NPV = Σ CF<sub>t</sub>/(1+r)<sup>t</sup> 折现；<br/>
-            3. 所有金额单位均为 <b>万元</b>。
+            3. 所有金额单位均为<b>万元</b>。
           ")
       ),
       
@@ -121,8 +121,9 @@ ui <- fluidPage(
                      p("两个互斥投资方案 A 和 B，有关投资信息如表 2-17 所示。试在折现率为 10% 和 20% 的情况下，用净现值法对两方案进行决策分析。"),
                      tags$hr(),
                      h4("核心教学目标"),
+                     withMathJax(),
                      tags$ul(
-                       tags$li("理解净现值 NPV = Σ CFₜ / (1+r)ᵗ 的经济含义与计算方法；"),
+                       tags$li("理解净现值 $$NPV=\\sum_{t=0}^{T}\\frac{CF_t}{(1+r)^t}$$ 的经济含义与计算方法；"),
                        tags$li("明确第 0 年初始投资不折现，后续年度现金流按复利折现；"),
                        tags$li("比较不同折现率下互斥投资方案的优劣，并识别临界折现率；"),
                        tags$li("当两个方案 NPV 均为负时，能够判断“不投资”更优。")
