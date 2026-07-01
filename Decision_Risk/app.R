@@ -227,7 +227,7 @@ run_risk_self_tests <- function() {
 
   # 错误输入测试
   err_cases <- list(
-    list(name = "概率和 = 0.9", f = function() calc_risk_decision(payoff_b, c(0.6, 0.3), "benefit"), hint = "概率之和必须严格等于 1。"),
+    list(name = "概率和 = 0.9", f = function() calc_risk_decision(payoff_b, c(0.6, 0.3), "benefit"), hint = "概率应非负且和为 1；代码允许 1e-8 内的数值误差。"),
     list(name = "概率存在负数", f = function() calc_risk_decision(payoff_b, c(0.6, -0.2), "benefit"), hint = "概率必须非负。"),
     list(name = "payoff 含 NA", f = function() calc_risk_decision(matrix(c(800, NA, 200, -20), nrow = 2, byrow = TRUE), prob, "benefit"), hint = "应检测到缺失值并报错。"),
     list(name = "矩阵列数与概率长度不一致", f = function() calc_risk_decision(payoff_b, c(0.5, 0.3, 0.2), "benefit"), hint = "应检查维度一致性。")
@@ -405,13 +405,13 @@ ui <- fluidPage(
           div(
             class = "info-box",
             h4("先验概率"),
-            helpText("各自然状态的概率，非负且和必须严格等于 1。"),
+            helpText("各自然状态的概率，应非负且和为 1；代码允许 1e-8 内的数值误差。"),
             rHandsontableOutput("prior_hot")
           ),
           div(
             class = "info-box",
             h4("似然矩阵 P(信号 | 真实状态)"),
-            helpText("行=真实状态，列=试销/信号结果，每行概率之和必须严格等于 1。"),
+            helpText("行=真实状态，列=试销/信号结果，每行概率之和应非负且为 1；代码允许 1e-8 内的数值误差。"),
             rHandsontableOutput("likelihood_hot")
           )
         ),

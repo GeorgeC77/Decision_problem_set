@@ -351,7 +351,7 @@ ui <- fluidPage(
             tags$ul(
               tags$li(tags$b("Maximax（收益型乐观）/ Minimin（成本型乐观）"), "：收益型 Maximax 先取每个方案的最大收益，再选择其中最大者；成本型 Minimin 先取每个方案的最小成本，再选择其中最小者。"),
               tags$li(tags$b("Maximin（收益型悲观）/ Minimax（成本型悲观）"), "：收益型 Maximin 先取每个方案的最小收益，再选择其中最大者；成本型 Minimax 先取每个方案的最大成本，再选择其中最小者。"),
-              tags$li(tags$b("Laplace（等可能）"), "：假设各状态概率相等，选择期望指标最优的方案。等可能是一种假设，不是已知概率；因此 Laplace 仍属于不确定型决策准则。"),
+              tags$li(tags$b("Laplace（等可能）"), "：在缺乏概率信息时，作为计算假设将各自然状态视为等可能，然后选择平均收益最大或平均成本最小的方案。这里的等可能是假设，不是已知概率。"),
               tags$li(tags$b("Hurwicz（折中）"), "：用乐观系数 alpha 对最好与最坏结果加权。"),
               tags$li(tags$b("Savage（最小最大后悔值）"), "：构造后悔值矩阵，选择最大后悔值最小的方案。")
             ),
