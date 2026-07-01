@@ -20,3 +20,7 @@ Thumbs.db
 # R workspace and history
 .RData
 .Rhistory
+
+# Temporary rendered images for exercise review
+tmp_exercises/
+tmp_toc/
