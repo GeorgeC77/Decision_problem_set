@@ -11,48 +11,143 @@ library(tidyr)
 # 工具函数
 # =========================
 
-# 概率校验：非负、和为 1
+# 概率校验：非负、和为 1（严格，不归一化）
 validate_probs <- function(p, name = "概率") {
   p <- suppressWarnings(as.numeric(p))
   if (any(is.na(p))) {
     return(list(valid = FALSE, msg = sprintf("%s 存在缺失或非数值，请检查输入。", name), p = p))
   }
-  msg <- NULL
   if (any(p < 0)) {
-    p <- pmax(p, 0)
-    msg <- sprintf("%s 存在负值，已自动截断为 0 并重新归一化。", name)
+    return(list(valid = FALSE, msg = sprintf("%s 存在负值，概率必须非负。", name), p = p))
   }
   s <- sum(p)
-  if (s == 0) {
-    return(list(valid = FALSE, msg = sprintf("%s 之和不能为 0。", name), p = p))
-  }
   if (abs(s - 1) > 1e-6) {
-    p <- p / s
-    if (is.null(msg)) msg <- sprintf("%s 之和不等于 1，已自动归一化。", name)
+    return(list(valid = FALSE, msg = sprintf("%s 之和为 %.6f，必须等于 1，请修改输入。", name, s), p = p))
   }
-  list(valid = TRUE, msg = msg, p = p)
+  list(valid = TRUE, msg = NULL, p = p / s)
 }
 
-# 转移/似然矩阵校验：非负、每行和为 1
+# 似然矩阵校验：非负、每行和为 1（严格，不归一化）
 validate_likelihood <- function(M, name = "似然矩阵") {
   M <- suppressWarnings(as.numeric(M))
   if (any(is.na(M))) {
     return(list(valid = FALSE, msg = sprintf("%s 存在缺失或非数值。", name), M = M))
   }
-  msg <- NULL
   if (any(M < 0)) {
-    msg <- sprintf("%s 存在负值，已自动截断为 0 并重新归一化。", name)
+    return(list(valid = FALSE, msg = sprintf("%s 存在负值，概率必须非负。", name), M = M))
   }
-  M <- matrix(pmax(M, 0), nrow = sqrt(length(M)))
+  M <- matrix(M, nrow = sqrt(length(M)))
   rs <- rowSums(M)
-  if (any(rs == 0)) {
-    return(list(valid = FALSE, msg = sprintf("%s 存在行和为 0 的行。", name), M = M))
-  }
   if (any(abs(rs - 1) > 1e-6)) {
-    M <- M / rs
-    if (is.null(msg)) msg <- sprintf("%s 每行之和不等于 1，已自动归一化。", name)
+    bad <- which(abs(rs - 1) > 1e-6)[1]
+    return(list(valid = FALSE,
+                msg = sprintf("%s 第 %d 行之和为 %.6f，每行必须等于 1，请修改输入。", name, bad, rs[bad]),
+                M = M))
   }
-  list(valid = TRUE, msg = msg, M = M)
+  list(valid = TRUE, msg = NULL, M = M)
+}
+
+# 风险型决策核心计算
+calc_risk_decision <- function(payoff, prior, likelihood, is_benefit,
+                               action_names, state_names, signal_names) {
+  n_a <- nrow(payoff)
+  n_s <- ncol(payoff)
+  n_k <- ncol(likelihood)
+
+  prior_mat <- matrix(prior, nrow = n_a, ncol = n_s, byrow = TRUE)
+  expected <- rowSums(payoff * prior_mat)
+  names(expected) <- action_names
+
+  if (is_benefit) {
+    best_val <- max(expected)
+    best_idx <- which(abs(expected - best_val) < 1e-9)
+    perfect_info_value <- sum(prior * apply(payoff, 2, max))
+    evpi <- perfect_info_value - best_val
+    regret <- sweep(matrix(apply(payoff, 2, max), nrow = n_a, ncol = n_s, byrow = TRUE),
+                    1:2, payoff, "-")
+  } else {
+    best_val <- min(expected)
+    best_idx <- which(abs(expected - best_val) < 1e-9)
+    perfect_info_value <- sum(prior * apply(payoff, 2, min))
+    evpi <- best_val - perfect_info_value
+    regret <- sweep(payoff, 2, apply(payoff, 2, min), "-")
+  }
+
+  if (evpi < -1e-8) {
+    stop("EVPI 计算为负值，请检查收益/成本类型设置或输入数据方向是否正确。")
+  }
+  evpi <- max(evpi, 0)
+
+  eol <- rowSums(regret * prior_mat)
+  if (abs(min(eol) - evpi) > 1e-6) {
+    stop(sprintf("期望机会损失 EOL 的最小值（%.6f）与 EVPI（%.6f）不一致，请检查后悔值或 EVPI 公式。",
+                 min(eol), evpi))
+  }
+
+  # 贝叶斯后验
+  sample_margin <- as.vector(prior %*% likelihood)
+  names(sample_margin) <- signal_names
+
+  posterior <- sweep(likelihood * prior, 2, sample_margin, "/")
+  posterior <- apply(posterior, 2, function(x) {
+    s <- sum(x)
+    if (s == 0) x else x / s
+  })
+  rownames(posterior) <- state_names
+  colnames(posterior) <- signal_names
+
+  post_decisions <- lapply(seq_len(n_k), function(j) {
+    post_prob <- posterior[, j]
+    exp_post <- payoff %*% post_prob
+    if (is_benefit) {
+      best_post_val <- max(exp_post)
+      best_post_idx <- which(abs(exp_post - best_post_val) < 1e-9)
+    } else {
+      best_post_val <- min(exp_post)
+      best_post_idx <- which(abs(exp_post - best_post_val) < 1e-9)
+    }
+    data.frame(
+      信号 = signal_names[j],
+      边际概率 = round(sample_margin[j], 4),
+      最优方案 = paste(action_names[best_post_idx], collapse = ", "),
+      最优期望指标 = round(best_post_val, 4),
+      stringsAsFactors = FALSE
+    )
+  })
+  post_df <- do.call(rbind, post_decisions)
+
+  expected_posterior_value <- sum(sample_margin * post_df$最优期望指标)
+  if (is_benefit) {
+    evsi <- expected_posterior_value - best_val
+  } else {
+    evsi <- best_val - expected_posterior_value
+  }
+  if (evsi < -1e-8) {
+    stop("EVSI 计算为负值，请检查输入数据。")
+  }
+  evsi <- max(evsi, 0)
+
+  list(
+    payoff = payoff,
+    prior = prior,
+    likelihood = likelihood,
+    posterior = posterior,
+    expected = expected,
+    best_val = best_val,
+    best_action = paste(action_names[best_idx], collapse = ", "),
+    best_idx = best_idx,
+    perfect_info_value = perfect_info_value,
+    evpi = evpi,
+    regret = regret,
+    eol = eol,
+    post_df = post_df,
+    evsi = evsi,
+    expected_posterior_value = expected_posterior_value,
+    is_benefit = is_benefit,
+    action_names = action_names,
+    state_names = state_names,
+    signal_names = signal_names
+  )
 }
 
 # =========================
@@ -150,8 +245,9 @@ ui <- fluidPage(
       helpText("输入说明："),
       tags$ul(
         tags$li("收益/成本矩阵：行=方案，列=自然状态，单位为万元。"),
-        tags$li("先验概率：各自然状态的概率，必须非负且和为 1。"),
-        tags$li("似然矩阵：行=真实状态，列=试销结果/信号，每行之和为 1。"),
+        tags$li("先验概率：各自然状态的概率，必须非负且和严格等于 1。"),
+        tags$li("似然矩阵：行=真实状态，列=试销结果/信号，每行之和必须严格等于 1。"),
+        tags$li("若概率或行和不等于 1，页面会提示修改，不会自动归一化。"),
         tags$li("可直接在表格中编辑，支持复制粘贴。")
       )
     ),
@@ -165,7 +261,17 @@ ui <- fluidPage(
           div(
             class = "info-box",
             h4("问题背景"),
-            p("风险型决策是指决策者知道各自然状态出现的概率，并据此计算期望指标进行决策。本网页以教材第三章“风险型决策分析”为背景，帮助理解期望准则、后悔值、完全情报价值（EVPI）与样本情报价值（EVSI）的计算与含义。"),
+            p("风险型决策是指决策者知道各自然状态出现的概率（或可估计概率），并据此计算期望指标进行决策。本网页以教材第三章“风险型决策分析”为背景，帮助理解期望准则、后悔值、完全情报价值（EVPI）与样本情报价值（EVSI）的计算与含义。"),
+            tags$details(
+              tags$summary("查看计算说明"),
+              br(),
+              tags$ul(
+                tags$li("收益型：EMV_i = Σ_j p_j · x_{ij}，选择 EMV 最大的方案；EVPI = Σ_j p_j · max_i(x_{ij}) - max_i(EMV_i)。"),
+                tags$li("成本型：EC_i = Σ_j p_j · c_{ij}，选择 EC 最小的方案；EVPI = min_i(EC_i) - Σ_j p_j · min_i(c_{ij})。"),
+                tags$li("后悔值按每个自然状态分别计算：收益型 regret_{ij}=max_i(x_{ij})-x_{ij}；成本型 regret_{ij}=c_{ij}-min_i(c_{ij})。"),
+                tags$li("后验概率由贝叶斯公式给出：P(状态|信号) ∝ P(信号|状态)·P(状态)。")
+              )
+            ),
             tags$hr(),
             h4("核心教学目标"),
             tags$ul(
@@ -192,13 +298,13 @@ ui <- fluidPage(
           div(
             class = "info-box",
             h4("先验概率"),
-            helpText("各自然状态的概率，非负且和必须等于 1。"),
+            helpText("各自然状态的概率，非负且和必须严格等于 1。"),
             rHandsontableOutput("prior_hot")
           ),
           div(
             class = "info-box",
             h4("似然矩阵 P(信号 | 真实状态)"),
-            helpText("行=真实状态，列=试销/信号结果，每行概率之和必须等于 1。"),
+            helpText("行=真实状态，列=试销/信号结果，每行概率之和必须严格等于 1。"),
             rHandsontableOutput("likelihood_hot")
           )
         ),
@@ -387,7 +493,6 @@ server <- function(input, output, session) {
   })
 
   observeEvent(input$calculate, {
-    # 读取表格
     payoff_tbl <- hot_to_r(input$payoff_hot)
     prior_tbl <- hot_to_r(input$prior_hot)
     likelihood_tbl <- hot_to_r(input$likelihood_hot)
@@ -411,7 +516,6 @@ server <- function(input, output, session) {
       showNotification(vp$msg, type = "error")
       return()
     }
-    if (!is.null(vp$msg)) showNotification("先验概率已自动归一化。", type = "warning")
     prior <- vp$p
 
     vl <- validate_likelihood(likelihood, "似然矩阵")
@@ -419,104 +523,22 @@ server <- function(input, output, session) {
       showNotification(vl$msg, type = "error")
       return()
     }
-    if (!is.null(vl$msg)) showNotification("似然矩阵每行已自动归一化。", type = "warning")
     likelihood <- vl$M
-
-    n_a <- nrow(payoff)
-    n_s <- ncol(payoff)
-    n_k <- ncol(likelihood)
-    action_names <- rownames(payoff_tbl)
-    state_names <- colnames(payoff_tbl)
-    signal_names <- colnames(likelihood_tbl)
 
     is_benefit <- input$problem_type == "benefit"
 
-    # 先验期望
-    prior_mat <- matrix(prior, nrow = n_a, ncol = n_s, byrow = TRUE)
-    expected <- rowSums(payoff * prior_mat)
-    names(expected) <- action_names
-
-    if (is_benefit) {
-      best_val <- max(expected)
-      best_idx <- which(expected == best_val)
-      best_action <- paste(action_names[best_idx], collapse = ", ")
-      perfect_info_value <- sum(prior * apply(payoff, 2, max))
-      evpi <- perfect_info_value - best_val
-      regret <- sweep(matrix(apply(payoff, 2, max), nrow = n_a, ncol = n_s, byrow = TRUE),
-                      1:2, payoff, "-")
-    } else {
-      best_val <- min(expected)
-      best_idx <- which(expected == best_val)
-      best_action <- paste(action_names[best_idx], collapse = ", ")
-      perfect_info_value <- sum(prior * apply(payoff, 2, min))
-      evpi <- best_val - perfect_info_value
-      regret <- sweep(payoff, 2, apply(payoff, 2, min), "-")
-    }
-    evpi <- max(evpi, 0)
-
-    eol <- rowSums(regret * prior_mat)
-
-    # 贝叶斯
-    sample_margin <- as.vector(prior %*% likelihood)
-    names(sample_margin) <- signal_names
-
-    posterior <- sweep(likelihood * prior, 2, sample_margin, "/")
-    posterior <- apply(posterior, 2, function(x) {
-      s <- sum(x)
-      if (s == 0) x else x / s
-    })
-    rownames(posterior) <- state_names
-    colnames(posterior) <- signal_names
-
-    post_decisions <- lapply(seq_len(n_k), function(j) {
-      post_prob <- posterior[, j]
-      exp_post <- payoff %*% post_prob
-      if (is_benefit) {
-        best_post_val <- max(exp_post)
-        best_post_idx <- which(exp_post == best_post_val)
-      } else {
-        best_post_val <- min(exp_post)
-        best_post_idx <- which(exp_post == best_post_val)
+    res <- tryCatch(
+      calc_risk_decision(payoff, prior, likelihood, is_benefit,
+                         action_names = rownames(payoff_tbl),
+                         state_names = colnames(payoff_tbl),
+                         signal_names = colnames(likelihood_tbl)),
+      error = function(e) {
+        showNotification(conditionMessage(e), type = "error")
+        NULL
       }
-      data.frame(
-        信号 = signal_names[j],
-        边际概率 = round(sample_margin[j], 4),
-        最优方案 = paste(action_names[best_post_idx], collapse = ", "),
-        最优期望指标 = round(best_post_val, 4),
-        stringsAsFactors = FALSE
-      )
-    })
-    post_df <- do.call(rbind, post_decisions)
-
-    expected_posterior_value <- sum(sample_margin * post_df$最优期望指标)
-    if (is_benefit) {
-      evsi <- expected_posterior_value - best_val
-    } else {
-      evsi <- best_val - expected_posterior_value
-    }
-    evsi <- max(evsi, 0)
-
-    rv$res <- list(
-      payoff = payoff,
-      prior = prior,
-      likelihood = likelihood,
-      posterior = posterior,
-      expected = expected,
-      best_val = best_val,
-      best_action = best_action,
-      best_idx = best_idx,
-      perfect_info_value = perfect_info_value,
-      evpi = evpi,
-      regret = regret,
-      eol = eol,
-      post_df = post_df,
-      evsi = evsi,
-      expected_posterior_value = expected_posterior_value,
-      is_benefit = is_benefit,
-      action_names = action_names,
-      state_names = state_names,
-      signal_names = signal_names
     )
+
+    rv$res <- res
   })
 
   output$prior_metric_cards <- renderUI({
@@ -655,7 +677,6 @@ server <- function(input, output, session) {
     res <- rv$res
     n_s <- length(res$state_names)
     if (n_s != 2) {
-      # 多于两个状态时，固定其他状态等比例变化较复杂，此处提示
       return(
         ggplot() + annotate("text", x = 0.5, y = 0.5,
                             label = "仅当自然状态为 2 个时绘制此图") +

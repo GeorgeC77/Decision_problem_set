@@ -98,6 +98,9 @@ ui <- fluidPage(
       numericInput("r2", "折现率 2 (%)", value = 20, min = -99, max = 100, step = 1),
       
       tags$hr(),
+      h4("操作"),
+      actionButton("reset_default", "恢复教材默认值", class = "btn-warning"),
+      tags$hr(),
       h4("方案现金流"),
       div(class = "sidebar-note",
           HTML("
@@ -119,6 +122,16 @@ ui <- fluidPage(
                  div(class = "info-box",
                      h4("问题背景"),
                      p("两个互斥投资方案 A 和 B，有关投资信息如表 2-17 所示。试在折现率为 10% 和 20% 的情况下，用净现值法对两方案进行决策分析。"),
+                     tags$details(
+                       tags$summary("查看计算说明"),
+                       br(),
+                       tags$ul(
+                         tags$li("净现值公式：$$NPV=\\sum_{t=0}^{T}\\frac{CF_t}{(1+r)^t}$$，其中第 0 年不折现。"),
+                         tags$li("互斥方案比较以 NPV 较高者优先，不要与内部收益率 IRR 的高低混淆。"),
+                         tags$li("若允许放弃投资，两个方案 NPV 均 ≤ 0 时选择“不投资”；若题目要求必须二选一，则选 NPV 较高者。"),
+                         tags$li("临界折现率是两方案 NPV 曲线的交点，可能不存在或多个，图中只标出搜索范围内的交点。")
+                       )
+                     ),
                      tags$hr(),
                      h4("核心教学目标"),
                      withMathJax(),
@@ -196,6 +209,13 @@ server <- function(input, output, session) {
     rv$df_B[info$row, info$col + 1] <- as.numeric(info$value)
   })
   
+  observeEvent(input$reset_default, {
+    rv$df_A <- data.frame(年份 = default_years, 现金流_万元 = default_A)
+    rv$df_B <- data.frame(年份 = default_years, 现金流_万元 = default_B)
+    updateNumericInput(session, "r1", value = 10)
+    updateNumericInput(session, "r2", value = 20)
+  })
+  
   calc <- eventReactive(input$calculate, {
     # 折现率边界校验
     if (input$r1 <= -100 || input$r2 <= -100) {
@@ -222,7 +242,7 @@ server <- function(input, output, session) {
     decision <- function(npv_A, npv_B) {
       if (max(npv_A, npv_B) <= 0) {
         list(best = "不投资", invest = "否",
-             explain = sprintf("方案 A NPV = %.2f 万元，方案 B NPV = %.2f 万元，两方案 NPV 均 ≤ 0，建议放弃投资。",
+             explain = sprintf("方案 A NPV = %.2f 万元，方案 B NPV = %.2f 万元，两方案 NPV 均 ≤ 0。若允许放弃投资，选择“不投资”更优；若题目要求必须二选一，则选 NPV 较高者。",
                                npv_A, npv_B))
       } else if (npv_A > npv_B) {
         list(best = "A", invest = "是",
@@ -309,7 +329,7 @@ server <- function(input, output, session) {
         h4("综合决策建议"),
         p(sprintf("折现率 %.0f%%：%s", input$r1, calc()$dec_r1$explain)),
         p(sprintf("折现率 %.0f%%：%s", input$r2, calc()$dec_r2$explain)),
-        p("提示：若两个折现率下推荐方案不同，说明方案选择对折现率敏感，可结合“图形分析”中的临界折现率进一步判断。")
+        p("提示：若两个折现率下推荐方案不同，说明方案选择对折现率敏感，可结合“图形分析”中的方案转换点进一步判断。互斥项目应以 NPV 较高者优先，不要简单按“收益率高低”选择。")
     )
   })
   
@@ -332,7 +352,7 @@ server <- function(input, output, session) {
       geom_hline(yintercept = 0, linetype = "dashed", color = "gray50") +
       geom_vline(xintercept = c(input$r1, input$r2), linetype = "dotted", color = "gray40") +
       labs(title = "NPV 随折现率变化曲线",
-           subtitle = "虚线：两方案 NPV 相等时的临界折现率；点线：用户设置的折现率",
+           subtitle = "虚线：两方案 NPV 相等时的方案转换点；点线：用户设置的折现率",
            x = "折现率 (%)",
            y = "NPV（万元）") +
       theme_minimal(base_size = 14) +
@@ -355,12 +375,12 @@ server <- function(input, output, session) {
     req(calc())
     cross_rates <- find_crossover_rates(calc()$flows_A, calc()$flows_B, seq(0, 0.30, 0.005))
     if (all(is.na(cross_rates))) {
-      div(class = "info-box", p("在 0%~30% 范围内未找到两方案 NPV 相等的临界折现率（除 r=0 外），说明在此区间内某一方案始终占优。"))
+      div(class = "info-box", p("在 0%~30% 范围内未找到两方案 NPV 相等的方案转换点（除 r=0 外），说明在此区间内某一方案始终占优。复杂现金流下可能存在多个转换点，图中仅标出搜索范围内的交点。"))
     } else {
       div(class = "info-box",
-          p(sprintf("在 0%%~30%% 范围内，两方案 NPV 相等的临界折现率为：%s。",
+          p(sprintf("在 0%%~30%% 范围内，两方案 NPV 相等的方案转换点（临界折现率）为：%s。",
                     paste(sprintf("%.2f%%", cross_rates * 100), collapse = ", "))),
-          p("临界折现率左侧与右侧可能对应不同的最优方案，教学中可据此讨论折现率敏感度。")
+          p("方案转换点左侧与右侧可能对应不同的最优方案；若现金流更复杂，也可能存在多个转换点。教学中可据此讨论折现率敏感度。")
       )
     }
   })

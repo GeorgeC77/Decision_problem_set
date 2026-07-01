@@ -58,29 +58,58 @@ validate_transition <- function(P, name = "转移矩阵") {
   if (any(is.na(P))) {
     return(list(valid = FALSE, msg = sprintf("%s 存在缺失或非数值。", name), P = P))
   }
+  if (any(P < 0)) {
+    return(list(valid = FALSE, msg = sprintf("%s 存在负值，概率必须非负。", name), P = P))
+  }
   n <- sqrt(length(P))
-  P <- matrix(pmax(P, 0), nrow = n)
+  P <- matrix(P, nrow = n)
   rs <- rowSums(P)
   if (any(rs == 0)) {
     return(list(valid = FALSE, msg = sprintf("%s 存在行和为 0 的行。", name), P = P))
   }
+  msg <- NULL
   if (any(abs(rs - 1) > 1e-06)) {
     P <- P / rs
+    msg <- sprintf("%s 某些行之和不等于 1，已自动归一化。", name)
   }
-  list(valid = TRUE, msg = NULL, P = P)
+  list(valid = TRUE, msg = msg, P = P)
+}
+
+# 校验初始分布：非负、和为 1
+validate_initial_distribution <- function(S0, name = "初始状态分布") {
+  S0 <- suppressWarnings(as.numeric(S0))
+  if (any(is.na(S0))) {
+    return(list(valid = FALSE, msg = sprintf("%s 存在缺失或非数值。", name), S0 = S0))
+  }
+  if (any(S0 < 0)) {
+    return(list(valid = FALSE, msg = sprintf("%s 存在负值，概率必须非负。", name), S0 = S0))
+  }
+  s <- sum(S0)
+  if (abs(s - 1) > 1e-06) {
+    return(list(valid = FALSE,
+                msg = sprintf("%s 之和为 %.6f，必须等于 1，请修改输入。", name, s),
+                S0 = S0))
+  }
+  list(valid = TRUE, msg = NULL, S0 = S0 / s)
 }
 
 # 吸收链分析
 absorption_analysis <- function(P) {
   n <- nrow(P)
-  absorbing <- which(abs(diag(P) - 1) < 1e-6)
+  # 状态 i 吸收当且仅当 p_ii = 1 且该行其余元素为 0
+  absorbing <- which(abs(diag(P) - 1) < 1e-6 & rowSums(P) - diag(P) < 1e-6)
   nonabs <- setdiff(seq_len(n), absorbing)
   if (length(absorbing) == 0 || length(nonabs) == 0) {
     return(NULL)
   }
   Q <- P[nonabs, nonabs, drop = FALSE]
   R <- P[nonabs, absorbing, drop = FALSE]
-  N <- solve(diag(length(nonabs)) - Q)
+  Iq <- diag(length(nonabs))
+  N <- tryCatch(solve(Iq - Q), error = function(e) NULL)
+  if (is.null(N)) {
+    return(list(absorbing = absorbing, nonabs = nonabs, Q = Q, R = R,
+                N = NULL, B = NULL, t = NULL, singular = TRUE))
+  }
   B <- N %*% R
   t <- as.vector(N %*% rep(1, length(nonabs)))
   list(
@@ -90,8 +119,21 @@ absorption_analysis <- function(P) {
     R = R,
     N = N,
     B = B,
-    t = t
+    t = t,
+    singular = FALSE
   )
+}
+
+# 检查并修正概率向量行和
+normalize_rows <- function(mat, tol = 1e-4) {
+  rs <- rowSums(mat)
+  if (any(abs(rs - 1) > tol)) {
+    return(list(mat = mat, ok = FALSE, max_dev = max(abs(rs - 1))))
+  }
+  if (any(abs(rs - 1) > 1e-8)) {
+    mat <- mat / rs
+  }
+  list(mat = mat, ok = TRUE, max_dev = max(abs(rs - 1)))
 }
 
 # =========================
@@ -217,6 +259,16 @@ ui <- fluidPage(
               tags$li("计算 n 步转移后的状态概率 π_t = π_0 P^t；"),
               tags$li("求稳态分布 π（满足 π = πP）并计算稳态期望利润；"),
               tags$li("识别吸收状态，计算基本矩阵 N、吸收概率 B 与期望吸收时间 t。")
+            ),
+            tags$details(
+              tags$summary("查看计算说明"),
+              br(),
+              tags$ul(
+                tags$li("行随机矩阵：P 的每一行之和为 1；状态更新为 π_{t+1} = π_t · P。"),
+                tags$li("n 步状态概率：π_t = π_0 · P^t。"),
+                tags$li("稳态分布满足 π = πP，且元素之和为 1；仅当链不可约且非周期时才存在唯一稳态分布。"),
+                tags$li("吸收链：状态 i 吸收当且仅当 p_ii = 1 且其余 p_ij = 0。基本矩阵 N = (I - Q)^{-1}，吸收概率 B = N·R，期望吸收时间 t = N·1。")
+              )
             ),
             tags$hr(),
             h4("基本约定"),
@@ -350,17 +402,12 @@ server <- function(input, output, session) {
     }
 
     S0v <- suppressWarnings(as.numeric(S0_tbl[1, ]))
-    if (any(is.na(S0v))) {
-      showNotification("初始状态分布存在缺失或非数值。", type = "error")
+    vi <- validate_initial_distribution(S0v, "初始状态分布")
+    if (!vi$valid) {
+      showNotification(vi$msg, type = "error")
       return()
     }
-    if (any(S0v < 0)) S0v <- pmax(S0v, 0)
-    s <- sum(S0v)
-    if (s == 0) {
-      showNotification("初始状态分布之和不能为 0。", type = "error")
-      return()
-    }
-    S0v <- S0v / s
+    S0v <- vi$S0
 
     val_A <- validate_transition(as.matrix(PA_tbl), "策略 A 转移矩阵")
     val_B <- validate_transition(as.matrix(PB_tbl), "策略 B 转移矩阵")
@@ -394,6 +441,20 @@ server <- function(input, output, session) {
     prob_A$时期 <- 0:n
     prob_B$时期 <- 0:n
 
+    # 检查每期概率和
+    check_A <- normalize_rows(prob_A[, state_names, drop = FALSE])
+    check_B <- normalize_rows(prob_B[, state_names, drop = FALSE])
+    if (!check_A$ok || !check_B$ok) {
+      showNotification(sprintf("状态概率演化出现明显偏离 1 的行（最大偏差 %.6f），请检查输入矩阵。",
+                               max(check_A$max_dev, check_B$max_dev)), type = "error")
+      return()
+    }
+    if (check_A$max_dev > 1e-8 || check_B$max_dev > 1e-8) {
+      showNotification("状态概率演化因数值误差已自动归一化。", type = "warning")
+      prob_A[, state_names] <- check_A$mat
+      prob_B[, state_names] <- check_B$mat
+    }
+
     # 稳态
     ss_A <- steady_state(PA)
     ss_B <- steady_state(PB)
@@ -420,8 +481,8 @@ server <- function(input, output, session) {
     req(rv$res)
     div(class = "info-box",
         p(strong("转移矩阵已校验。")),
-        p("采用行随机矩阵约定：π_{t+1} = π_t · P。每行概率之和已校验为 1。"),
-        p("稳态结论成立的前提是马尔可夫链不可约且非周期；若链为吸收链或周期链，稳态可能不唯一或不存在。")
+        p("采用行随机矩阵约定：π_{t+1} = π_t · P。每行概率之和已校验为 1；初始状态分布之和也已校验为 1。"),
+        p("稳态结论成立的前提是马尔可夫链不可约且非周期；若链为吸收链、周期链或存在多个闭类，则状态分布可能不唯一、震荡或不会收敛到唯一稳态。")
     )
   })
 
@@ -456,11 +517,13 @@ server <- function(input, output, session) {
   output$recommend <- renderUI({
     req(rv$res)
     better <- if (rv$res$exp_A >= rv$res$exp_B) "A" else "B"
+    any_absorb <- !is.null(rv$res$abs_A) || !is.null(rv$res$abs_B)
     div(class = "info-box",
         h4("推荐结果"),
-        p(sprintf("若两策略对应的马尔可夫链均收敛到唯一稳态，则从稳态期望年利润看，策略 %s 更优（%.2f vs %.2f 万元）。",
+        p(sprintf("若两策略对应的马尔可夫链均不可约且非周期，则状态分布会收敛到唯一稳态；从稳态期望年利润看，策略 %s 更优（%.2f vs %.2f 万元）。",
                   better, max(rv$res$exp_A, rv$res$exp_B), min(rv$res$exp_A, rv$res$exp_B))),
-        p("若存在吸收状态，稳态分布不唯一，应参考“吸收链分析”标签页。若经营期限较短，应结合“图形分析”中 n 步状态概率演化综合判断。")
+        p(if (any_absorb) "检测到吸收状态：吸收链不存在唯一稳态，应参考“吸收链分析”标签页。" else "未检测到吸收状态，但周期链或多个闭类仍可能导致稳态不唯一或震荡。"),
+        p("若经营期限较短，应结合“图形分析”中 n 步状态概率演化综合判断。")
     )
   })
 
@@ -485,6 +548,12 @@ server <- function(input, output, session) {
     for (pol in c("A", "B")) {
       abs_info <- rv$res[[paste0("abs_", pol)]]
       if (!is.null(abs_info)) {
+        if (isTRUE(abs_info$singular)) {
+          out <- tagList(out, h4(sprintf("策略 %s 吸收链分析", pol)),
+                         div(class = "warning-box",
+                             p(sprintf("策略 %s 虽检测到吸收状态，但 (I - Q) 不可逆，无法计算基本矩阵 N。请检查转移矩阵是否正确。", pol))))
+          next
+        }
         sn <- rv$res$state_names
         nonabs_names <- sn[abs_info$nonabs]
         abs_names <- sn[abs_info$absorb]
@@ -533,7 +602,7 @@ server <- function(input, output, session) {
     req(rv$res)
     for (pol in c("A", "B")) {
       abs_info <- rv$res[[paste0("abs_", pol)]]
-      if (!is.null(abs_info)) {
+      if (!is.null(abs_info) && !isTRUE(abs_info$singular)) {
         local({
           p <- pol
           ai <- abs_info

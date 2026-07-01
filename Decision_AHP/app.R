@@ -54,6 +54,22 @@ fill_pairwise_matrix <- function(upper) {
   mat
 }
 
+# 判断矩阵输入校验
+validate_pairwise_upper <- function(upper, name) {
+  upper <- suppressWarnings(as.numeric(upper))
+  if (any(is.na(upper))) {
+    stop(sprintf("%s 存在缺失或非数值，请检查输入。", name))
+  }
+  n <- sqrt(length(upper))
+  if (n < 1 || n != floor(n)) {
+    stop(sprintf("%s 不是方阵，请检查行列数。", name))
+  }
+  if (any(upper <= 0)) {
+    stop(sprintf("%s 存在非正数，判断矩阵所有元素必须严格大于 0。", name))
+  }
+  TRUE
+}
+
 # 教材第五章习题 2 默认数据
 criteria_names <- c("调动积极性 C1", "提高企业水平 C2", "改善福利 C3")
 alt_names <- c("发奖金 a1", "集体福利 a2", "办职校 a3", "建俱乐部 a4", "引进设备 a5")
@@ -153,10 +169,11 @@ ui <- fluidPage(
       tags$hr(),
       h4("使用说明"),
       tags$ul(
-        tags$li("本网页权重采用几何平均近似法（即判断矩阵各行几何平均值归一化）计算。"),
-        tags$li("左侧输入判断矩阵；上三角数值改变后，下三角会自动补为倒数。"),
+        tags$li("本网页权重采用几何平均近似法（即判断矩阵各行几何平均值归一化）计算，不是特征向量法。"),
+        tags$li("左侧输入判断矩阵；只需输入上三角，下三角会自动补为倒数，保持互反性。"),
         tags$li("一致性比率 CR < 0.1 时认为判断矩阵具有满意一致性；CR ≥ 0.1 时结果仅供参考，建议调整判断矩阵。"),
-        tags$li("1–9 标度含义：1 表示同等重要，3 表示稍重要，5 表示明显重要，7 表示强烈重要，9 表示极端重要；2、4、6、8 为相邻标度中间值。"),
+        tags$li("1–9 标度含义：1 同等重要；3 稍微重要；5 明显重要；7 强烈重要；9 极端重要；2、4、6、8 为相邻判断的中间值。若 i 相比 j 不重要，则使用上述数值的倒数。"),
+        tags$li("判断矩阵所有元素必须严格大于 0。n=1 或 n=2 时 RI=0，无需一致性检验。"),
         tags$li("教材中 C2 不含 a1、C3 不含 a5，网页默认用中性值占位，教师可引导学生讨论其合理性。")
       )
     ),
@@ -173,6 +190,16 @@ ui <- fluidPage(
             tags$p("某企业需要合理使用利润 G，考虑三个准则：调动积极性 C1、提高企业水平 C2、改善福利 C3。"),
             tags$p("备选方案包括：发奖金 a1、集体福利 a2、办职校 a3、建俱乐部 a4、引进设备 a5。"),
             tags$p("本网页用 AHP 层次分析法计算各准则权重和各方案相对排序。"),
+            tags$details(
+              tags$summary("查看计算说明"),
+              br(),
+              tags$ul(
+                tags$li("几何平均近似法：对判断矩阵每一行求几何平均，再归一化得到权重，权重之和为 1。"),
+                tags$li("λmax = 平均(Aw/w)，CI = (λmax - n)/(n - 1)，CR = CI/RI。"),
+                tags$li("层次总排序：将各准则下方案局部权重矩阵（行=方案，列=准则）与准则层权重相乘，得到各方案总排序权重。"),
+                tags$li("n=1 或 n=2 时 RI=0，无需一致性检验；一致性通过仅说明矩阵内部矛盾较小。")
+              )
+            ),
             tags$hr(),
             h4("核心教学目标"),
             tags$ul(
@@ -323,15 +350,17 @@ server <- function(input, output, session) {
   })
   
   observeEvent(input$calculate, {
+    tryCatch({
     # 读取准则矩阵
     crit_tbl <- hot_to_r(input$criteria_hot)
     crit_upper <- as.matrix(crit_tbl)
+    validate_pairwise_upper(crit_upper, "准则层判断矩阵")
     crit_mat <- fill_pairwise_matrix(crit_upper)
     rownames(crit_mat) <- rownames(crit_upper)
     colnames(crit_mat) <- colnames(crit_upper)
     rv$criteria_mat <- crit_mat
     rv$criteria_res <- ahp_weights(crit_mat)
-    
+
     # 读取方案矩阵
     alt_names_map <- criteria_names
     alt_tbls <- list(
@@ -339,9 +368,10 @@ server <- function(input, output, session) {
       "提高企业水平 C2" = hot_to_r(input$alt_hot_C2),
       "改善福利 C3" = hot_to_r(input$alt_hot_C3)
     )
-    
+
     rv$alt_res <- lapply(names(alt_tbls), function(nm) {
       upper <- as.matrix(alt_tbls[[nm]])
+      validate_pairwise_upper(upper, nm)
       mat <- fill_pairwise_matrix(upper)
       rownames(mat) <- rownames(upper)
       colnames(mat) <- colnames(upper)
@@ -380,6 +410,9 @@ server <- function(input, output, session) {
     total_ri <- sum(criteria_w * ris)
     total_cr <- if (total_ri == 0) 0 else total_ci / total_ri
     rv$total_cr <- list(ci = total_ci, ri = total_ri, cr = total_cr)
+    }, error = function(e) {
+      showNotification(conditionMessage(e), type = "error")
+    })
   })
   
   output$cr_warning <- renderUI({
@@ -390,10 +423,12 @@ server <- function(input, output, session) {
     if (any_fail) {
       div(
         class = "warning-box",
-        HTML("<b>一致性检验未全部通过：</b>部分判断矩阵的 CR ≥ 0.10。建议返回检查并调整相应矩阵。未通过一致性检验时，AHP 排序结果仅供参考。")
+        HTML("<b>一致性检验未全部通过：</b>部分判断矩阵的 CR ≥ 0.10（或 n≤2 以外未通过）。建议返回检查并调整相应矩阵。未通过一致性检验时，AHP 排序结果仅供参考。")
       )
     } else {
-      div(class = "info-box", p("所有判断矩阵一致性检验通过（CR < 0.10），结果可信。"))
+      div(class = "info-box",
+          p("所有判断矩阵一致性检验通过（CR < 0.10），结果可信。"),
+          p("注意：一致性通过只说明判断矩阵内部矛盾程度较低，并不代表偏好本身一定正确。"))
     }
   })
   
@@ -465,28 +500,40 @@ server <- function(input, output, session) {
   
   output$cr_detail_table <- renderDT({
     req(rv$criteria_res, rv$alt_res)
+    pass_text <- function(cr, n) {
+      if (n <= 2) "无需检验" else ifelse(cr < 0.1, "是", "否")
+    }
+    n_crit <- nrow(rv$criteria_mat)
+    ri_crit <- ri_table[as.character(n_crit)]
     rows <- data.frame(
       矩阵 = "准则层",
+      n = n_crit,
       λmax = round(rv$criteria_res$lambda, 4),
       CI = round(rv$criteria_res$ci, 4),
+      RI = round(ri_crit, 4),
       CR = round(rv$criteria_res$cr, 4),
-      是否通过 = ifelse(rv$criteria_res$cr < 0.1, "是", "否"),
+      是否通过 = pass_text(rv$criteria_res$cr, n_crit),
       stringsAsFactors = FALSE
     )
     for (nm in names(rv$alt_res)) {
       r <- rv$alt_res[[nm]]$res
+      mat <- rv$alt_res[[nm]]$mat
+      n_alt <- nrow(mat)
+      ri_alt <- ri_table[as.character(n_alt)]
       rows <- rbind(rows, data.frame(
         矩阵 = nm,
+        n = n_alt,
         λmax = round(r$lambda, 4),
         CI = round(r$ci, 4),
+        RI = round(ri_alt, 4),
         CR = round(r$cr, 4),
-        是否通过 = ifelse(r$cr < 0.1, "是", "否"),
+        是否通过 = pass_text(r$cr, n_alt),
         stringsAsFactors = FALSE
       ))
     }
     datatable(rows, rownames = FALSE,
               options = list(dom = "t", paging = FALSE, ordering = FALSE),
-              caption = "各判断矩阵一致性检验（CR < 0.10 为通过）")
+              caption = "各判断矩阵一致性检验（n≤2 无需检验；其余 CR < 0.10 为通过）")
   })
   
   output$total_cr_box <- renderUI({
@@ -499,7 +546,8 @@ server <- function(input, output, session) {
         "CI_total = Σ w_k · CI_k = ", round(rv$total_cr$ci, 4), "<br/>",
         "RI_total = Σ w_k · RI_k = ", round(rv$total_cr$ri, 4), "<br/>",
         "CR_total = CI_total / RI_total = ", round(rv$total_cr$cr, 4),
-        ifelse(pass, " < 0.1，通过总排序一致性检验。", " ≥ 0.1，未通过总排序一致性检验，建议调整判断矩阵。")
+        ifelse(pass, " < 0.1，通过总排序一致性检验。注意：一致性通过只说明判断矩阵内部矛盾程度较低，并不代表偏好本身一定正确。",
+               " ≥ 0.1，未通过总排序一致性检验，建议调整判断矩阵。")
       ))
     )
   })
