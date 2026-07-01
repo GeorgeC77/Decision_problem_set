@@ -284,7 +284,7 @@ ui <- fluidPage(
     "))
   ),
 
-  titlePanel(div(class = "title-main", "层次分析法 AHP 教学网页：特征向量法与一致性检验")),
+  titlePanel(div(class = "title-main", "层次分析法教学网页：特征向量法与一致性检验")),
 
   div(
     class = "copyright-box",

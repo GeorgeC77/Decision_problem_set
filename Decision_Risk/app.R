@@ -434,7 +434,7 @@ ui <- fluidPage(
           ),
           div(
             class = "info-box",
-            h4("完全情报价值 EVPI"),
+            h4("完全信息价值 EVPI"),
             uiOutput("evpi_box")
           ),
           br(),
@@ -456,7 +456,7 @@ ui <- fluidPage(
           ),
           div(
             class = "info-box",
-            h4("样本情报价值 EVSI"),
+            h4("样本信息价值 EVSI"),
             uiOutput("evsi_box")
           ),
           br(),
