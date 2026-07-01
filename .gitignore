@@ -1,0 +1,22 @@
+# RStudio user settings
+.Rproj.user/
+
+# RStudio Connect / shinyapps.io deployment
+rsconnect/
+
+# Original textbook PDF (copyrighted, too large)
+决策理论与方法教材（第三版）.pdf
+
+# Original zip archive (kept in project root locally only)
+Q_Learning.zip
+
+# OS files
+.DS_Store
+Thumbs.db
+
+# Logs
+*.log
+
+# R workspace and history
+.RData
+.Rhistory
