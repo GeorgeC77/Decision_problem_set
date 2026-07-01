@@ -28,10 +28,9 @@ default_likelihood <- matrix(
 rownames(default_likelihood) <- c("销路好", "销路差")
 colnames(default_likelihood) <- c("试销好", "试销差")
 
-# 试销结果边际概率（与似然、先验应自洽；教材表 3-25 取 0.8, 0.2）
-default_sample_margin <- c(0.8, 0.2)
-names(default_sample_margin) <- c("试销好", "试销差")
-
+# =========================
+# UI
+# =========================
 ui <- fluidPage(
   tags$head(
     tags$style(HTML("
@@ -59,6 +58,10 @@ ui <- fluidPage(
         background: #f8fafc; border: 1px solid #d9e2ec;
         border-radius: 10px; padding: 14px 16px; line-height: 1.8;
       }
+      .warning-box {
+        background: #fff3cd; border: 1px solid #f0d98c; border-radius: 8px;
+        padding: 12px 16px; margin-bottom: 14px; color: #7a4b00;
+      }
     "))
   ),
   
@@ -78,9 +81,19 @@ ui <- fluidPage(
   sidebarLayout(
     sidebarPanel(
       width = 3,
+      
+      h4("问题类型"),
+      radioButtons("problem_type", "收益型 / 成本型",
+                   choices = c("收益型（最大化期望收益）" = "benefit",
+                               "成本型（最小化期望成本）" = "cost"),
+                   selected = "benefit"),
+      helpText("收益型问题选“收益型”，成本型问题选“成本型”。后续期望准则与后悔值方向会随之改变。"),
+      
+      tags$hr(),
       h4("先验概率"),
       numericInput("p_good", "销路好概率", value = default_prior[1], min = 0, max = 1, step = 0.01),
       numericInput("p_bad", "销路差概率", value = default_prior[2], min = 0, max = 1, step = 0.01),
+      helpText("两概率之和必须等于 1，否则会自动归一化并提示。"),
       tags$hr(),
       
       h4("收益矩阵（万元）"),
@@ -95,10 +108,10 @@ ui <- fluidPage(
       numericInput("lh_good_bad", "真实好 → 试销差", value = default_likelihood[1, 2], min = 0, max = 1, step = 0.01),
       numericInput("lh_bad_good", "真实差 → 试销好", value = default_likelihood[2, 1], min = 0, max = 1, step = 0.01),
       numericInput("lh_bad_bad", "真实差 → 试销差", value = default_likelihood[2, 2], min = 0, max = 1, step = 0.01),
+      helpText("每行似然概率之和必须等于 1。"),
       tags$hr(),
       
-      actionButton("reset_btn", "恢复教材默认值", class = "btn-warning"),
-      helpText("注：当“试销结果边际概率”由先验与似然自动计算时，若与教材表 3-25 不一致，可视为教学演示允许学生自行探索参数。")
+      actionButton("reset_btn", "恢复教材默认值", class = "btn-warning")
     ),
     
     mainPanel(
@@ -115,14 +128,15 @@ ui <- fluidPage(
               tags$li("大批量生产销售：若销路好可获利 800 万元；若销路差将损失 100 万元。"),
               tags$li("小批量生产销售：若销路好可获利 200 万元；若销路差仅损失 20 万元。")
             ),
-            tags$p("公司决定先小批量试销，根据试销结果再决定是否转为大批量生产。"),
+            tags$p("公司决定先小批量试销，根据试销结果再决定是否转为大批量生产。销路好与销路差的概率已知，属于风险型决策。"),
             tags$hr(),
             h4("核心教学目标"),
             tags$ul(
-              tags$li("理解先验概率、收益矩阵与期望收益准则；"),
+              tags$li("理解风险型决策的前提：自然状态的概率已知或可以估计；"),
+              tags$li("掌握先验概率、收益矩阵与期望收益（EMV）/期望成本（EC）准则；"),
               tags$li("掌握贝叶斯公式：由似然和先验计算后验概率；"),
               tags$li("理解完全情报价值 EVPI 与样本情报价值 EVSI 的经济含义；"),
-              tags$li("体会“先抽样、后决策”的风险型决策流程。")
+              tags$li("区分收益型与成本型问题在期望准则和后悔值计算上的方向差异。")
             )
           )
         ),
@@ -134,14 +148,16 @@ ui <- fluidPage(
           br(),
           div(
             class = "info-box",
-            h4("先验概率下各方案期望收益"),
+            h4("先验概率下各方案期望指标"),
             DTOutput("prior_table")
           ),
           div(
             class = "info-box",
             h4("完全情报价值 EVPI"),
             uiOutput("evpi_box")
-          )
+          ),
+          br(),
+          uiOutput("prior_explain")
         ),
         
         tabPanel(
@@ -161,7 +177,9 @@ ui <- fluidPage(
             class = "info-box",
             h4("样本情报价值 EVSI"),
             uiOutput("evsi_box")
-          )
+          ),
+          br(),
+          uiOutput("posterior_explain")
         ),
         
         tabPanel(
@@ -171,7 +189,7 @@ ui <- fluidPage(
             class = "info-box",
             h4("先验概率变化对最优方案的影响"),
             plotOutput("prior_sensitivity_plot", height = "360px"),
-            tags$p(class = "small-note", "横轴为“销路好”的先验概率；两条曲线分别表示大批量和小批量方案的期望收益。")
+            tags$p(class = "small-note", "横轴为“销路好”的先验概率；两条曲线分别表示大批量和小批量方案的期望收益/成本。")
           ),
           div(
             class = "info-box",
@@ -197,11 +215,25 @@ server <- function(input, output, session) {
     updateNumericInput(session, "lh_good_bad", value = default_likelihood[1, 2])
     updateNumericInput(session, "lh_bad_good", value = default_likelihood[2, 1])
     updateNumericInput(session, "lh_bad_bad", value = default_likelihood[2, 2])
+    updateRadioButtons(session, "problem_type", selected = "benefit")
   })
   
   calc <- reactive({
     prior <- c(input$p_good, input$p_bad)
-    prior <- prior / sum(prior)  # 归一化
+    
+    # 概率校验
+    if (any(prior < 0)) {
+      showNotification("先验概率不能为负，已自动截断为 0。", type = "warning")
+      prior <- pmax(prior, 0)
+    }
+    prior_sum <- sum(prior)
+    if (prior_sum == 0) {
+      showNotification("先验概率不能全为 0，已恢复默认概率。", type = "error")
+      prior <- default_prior
+    } else if (abs(prior_sum - 1) > 1e-6) {
+      showNotification(sprintf("先验概率之和为 %.4f，已自动归一化。", prior_sum), type = "warning")
+      prior <- prior / prior_sum
+    }
     
     payoff <- matrix(
       c(input$big_good, input$big_bad,
@@ -219,8 +251,34 @@ server <- function(input, output, session) {
     rownames(likelihood) <- c("销路好", "销路差")
     colnames(likelihood) <- c("试销好", "试销差")
     
-    # 归一化似然行
-    likelihood <- likelihood / rowSums(likelihood)
+    # 校验似然行和
+    lh_sums <- rowSums(likelihood)
+    if (any(lh_sums == 0)) {
+      showNotification("似然矩阵每行概率之和不能为 0，已恢复默认值。", type = "error")
+      likelihood <- default_likelihood
+    } else if (any(abs(lh_sums - 1) > 1e-6)) {
+      showNotification("似然矩阵每行概率之和已自动归一化。", type = "warning")
+      likelihood <- likelihood / lh_sums
+    }
+    
+    is_benefit <- input$problem_type == "benefit"
+    
+    # 先验期望
+    prior_expected <- rowSums(payoff * matrix(prior, nrow = 2, ncol = 2, byrow = TRUE))
+    
+    if (is_benefit) {
+      best_prior_value <- max(prior_expected)
+      best_prior_action <- names(prior_expected)[which.max(prior_expected)]
+      perfect_info_value <- sum(prior * apply(payoff, 2, max))
+      evpi <- perfect_info_value - best_prior_value
+    } else {
+      best_prior_value <- min(prior_expected)
+      best_prior_action <- names(prior_expected)[which.min(prior_expected)]
+      perfect_info_value <- sum(prior * apply(payoff, 2, min))
+      evpi <- best_prior_value - perfect_info_value
+    }
+    # EVPI 必须非负，防止浮点误差导致极小负数
+    evpi <- max(evpi, 0)
     
     # 试销结果边际概率
     sample_margin <- as.vector(prior %*% likelihood)
@@ -232,15 +290,6 @@ server <- function(input, output, session) {
     rownames(posterior) <- rownames(likelihood)
     colnames(posterior) <- colnames(likelihood)
     
-    # 先验期望收益
-    prior_expected <- rowSums(payoff * matrix(prior, nrow = 2, ncol = 2, byrow = TRUE))
-    best_prior_value <- max(prior_expected)
-    best_prior_action <- names(prior_expected)[which.max(prior_expected)]
-    
-    # EVPI
-    perfect_info_value <- sum(prior * apply(payoff, 2, max))
-    evpi <- perfect_info_value - best_prior_value
-    
     # 后验决策
     posterior_decisions <- list()
     posterior_values <- numeric(ncol(posterior))
@@ -249,15 +298,21 @@ server <- function(input, output, session) {
     for (j in seq_len(ncol(posterior))) {
       post_prob <- posterior[, j]
       exp_values <- rowSums(payoff * matrix(post_prob, nrow = 2, ncol = 2, byrow = TRUE))
-      best <- names(exp_values)[which.max(exp_values)]
+      if (is_benefit) {
+        best <- names(exp_values)[which.max(exp_values)]
+        best_val <- max(exp_values)
+      } else {
+        best <- names(exp_values)[which.min(exp_values)]
+        best_val <- min(exp_values)
+      }
       posterior_decisions[[j]] <- list(
         试销结果 = colnames(posterior)[j],
         后验概率_销路好 = post_prob[1],
         后验概率_销路差 = post_prob[2],
-        大批量期望收益 = exp_values["大批量"],
-        小批量期望收益 = exp_values["小批量"],
+        大批量期望指标 = exp_values["大批量"],
+        小批量期望指标 = exp_values["小批量"],
         最优方案 = best,
-        最优期望收益 = max(exp_values)
+        最优期望指标 = best_val
       )
     }
     
@@ -266,17 +321,35 @@ server <- function(input, output, session) {
         试销结果 = x$试销结果,
         后验销路好 = round(x$后验概率_销路好, 4),
         后验销路差 = round(x$后验概率_销路差, 4),
-        大批量期望收益 = round(x$大批量期望收益, 2),
-        小批量期望收益 = round(x$小批量期望收益, 2),
+        大批量期望指标 = round(x$大批量期望指标, 2),
+        小批量期望指标 = round(x$小批量期望指标, 2),
         最优方案 = x$最优方案,
-        最优期望收益 = round(x$最优期望收益, 2),
+        最优期望指标 = round(x$最优期望指标, 2),
         stringsAsFactors = FALSE
       )
     }))
     
     # EVSI
-    expected_posterior_value <- sum(sample_margin * posterior_df$最优期望收益)
+    expected_posterior_value <- sum(sample_margin * posterior_df$最优期望指标)
     evsi <- expected_posterior_value - best_prior_value
+    if (!is_benefit) {
+      # 成本型：EVSI = 先验最优成本 - 后验最优成本，应为非负
+      evsi <- max(evsi, 0)
+    } else {
+      evsi <- max(evsi, 0)
+    }
+    
+    # 后悔值矩阵（用于教学和一致性校验）
+    if (is_benefit) {
+      best_each_state <- apply(payoff, 2, max)
+      regret <- sweep(matrix(best_each_state, nrow = nrow(payoff), ncol = ncol(payoff), byrow = TRUE),
+                      1:2, payoff, "-")
+    } else {
+      best_each_state <- apply(payoff, 2, min)
+      regret <- sweep(payoff, 2, best_each_state, "-")
+    }
+    rownames(regret) <- rownames(payoff)
+    colnames(regret) <- colnames(payoff)
     
     list(
       prior = prior,
@@ -290,12 +363,16 @@ server <- function(input, output, session) {
       evpi = evpi,
       posterior_df = posterior_df,
       evsi = evsi,
-      perfect_info_value = perfect_info_value
+      perfect_info_value = perfect_info_value,
+      is_benefit = is_benefit,
+      regret = regret,
+      best_each_state = best_each_state
     )
   })
   
   output$prior_metric_cards <- renderUI({
     res <- calc()
+    label <- if (res$is_benefit) "先验最大期望收益" else "先验最小期望成本"
     fluidRow(
       column(
         4,
@@ -303,16 +380,16 @@ server <- function(input, output, session) {
           class = "metric-card",
           div(class = "metric-title", "先验最优方案"),
           div(class = "metric-value", res$best_prior_action),
-          div(class = "metric-note", "按先验概率计算的期望收益最大方案")
+          div(class = "metric-note", if (res$is_benefit) "期望收益最大" else "期望成本最小")
         )
       ),
       column(
         4,
         div(
           class = "metric-card",
-          div(class = "metric-title", "先验最大期望收益"),
+          div(class = "metric-title", label),
           div(class = "metric-value", paste0(round(res$best_prior_value, 2), " 万元")),
-          div(class = "metric-note", "先验决策下的期望收益")
+          div(class = "metric-note", "按先验概率计算的决策指标")
         )
       ),
       column(
@@ -329,30 +406,52 @@ server <- function(input, output, session) {
   
   output$prior_table <- renderDT({
     res <- calc()
+    col_name <- if (res$is_benefit) "期望收益（万元）" else "期望成本（万元）"
     df <- data.frame(
       方案 = names(res$prior_expected),
-      期望收益 = round(res$prior_expected, 2),
+      期望指标 = round(res$prior_expected, 2),
       stringsAsFactors = FALSE
     )
+    colnames(df)[2] <- col_name
     datatable(
       df,
       rownames = FALSE,
       options = list(dom = "t", paging = FALSE, ordering = FALSE),
-      caption = "先验决策表"
+      caption = if (res$is_benefit) "先验决策表（收益型）" else "先验决策表（成本型）"
     )
   })
   
   output$evpi_box <- renderUI({
     res <- calc()
-    div(
-      class = "formula-box",
-      HTML(paste0(
+    if (res$is_benefit) {
+      html <- HTML(paste0(
         "<b>完全情报价值 EVPI</b> = 完全情报期望收益 - 先验最优期望收益<br/>",
         "= ", round(res$perfect_info_value, 2), " - ", round(res$best_prior_value, 2),
         " = <b>", round(res$evpi, 2), " 万元</b><br/><br/>",
         "含义：若获取完全情报的费用低于 EVPI，则获取情报在经济上是值得的。"
       ))
-    )
+    } else {
+      html <- HTML(paste0(
+        "<b>完全情报价值 EVPI</b> = 先验最优期望成本 - 完全情报期望成本<br/>",
+        "= ", round(res$best_prior_value, 2), " - ", round(res$perfect_info_value, 2),
+        " = <b>", round(res$evpi, 2), " 万元</b><br/><br/>",
+        "含义：若获取完全情报的费用低于 EVPI，则获取情报在经济上是值得的。"
+      ))
+    }
+    div(class = "formula-box", html)
+  })
+  
+  output$prior_explain <- renderUI({
+    res <- calc()
+    if (res$is_benefit) {
+      txt <- sprintf("根据期望收益最大准则，推荐方案为 %s，其先验期望收益为 %.2f 万元。",
+                     res$best_prior_action, res$best_prior_value)
+    } else {
+      txt <- sprintf("根据期望成本最小准则，推荐方案为 %s，其先验期望成本为 %.2f 万元。",
+                     res$best_prior_action, res$best_prior_value)
+    }
+    div(class = "info-box", h4("决策解释"), p(txt),
+        p("EVPI 表示为获得完全情报所愿支付的最高价格。若实际情报费用低于 EVPI，则获取情报有利。"))
   })
   
   output$posterior_table <- renderDT({
@@ -374,22 +473,31 @@ server <- function(input, output, session) {
       res$posterior_df,
       rownames = FALSE,
       options = list(dom = "t", paging = FALSE, ordering = FALSE),
-      caption = "基于后验概率的最优决策"
+      caption = if (res$is_benefit) "基于后验概率的最优决策（收益型）" else "基于后验概率的最优决策（成本型）"
     )
   })
   
   output$evsi_box <- renderUI({
     res <- calc()
-    post_val <- sum(res$sample_margin * res$posterior_df$最优期望收益)
+    post_val <- sum(res$sample_margin * res$posterior_df$最优期望指标)
     div(
       class = "formula-box",
       HTML(paste0(
-        "<b>样本情报价值 EVSI</b> = 后验期望收益 - 先验最优期望收益<br/>",
+        "<b>样本情报价值 EVSI</b> = 后验期望指标 - 先验最优指标<br/>",
         "= ", round(post_val, 2), " - ", round(res$best_prior_value, 2),
         " = <b>", round(res$evsi, 2), " 万元</b><br/><br/>",
-        "含义：若试销费用低于 EVSI，则进行试销在经济上是值得的。"
+        "含义：若试销/调查费用低于 EVSI，则进行抽样在经济上是值得的。"
       ))
     )
+  })
+  
+  output$posterior_explain <- renderUI({
+    res <- calc()
+    txt <- sprintf("在各试销结果下分别按%s准则决策，再按试销结果边际概率加权，得到后验期望指标为 %.2f 万元。",
+                   if (res$is_benefit) "期望收益最大" else "期望成本最小",
+                   sum(res$sample_margin * res$posterior_df$最优期望指标))
+    div(class = "info-box", h4("决策解释"), p(txt),
+        p(sprintf("EVSI = %.2f 万元。若试销费用低于该值，则进行试销有利。", res$evsi)))
   })
   
   output$prior_sensitivity_plot <- renderPlot({
@@ -402,18 +510,20 @@ server <- function(input, output, session) {
     
     df <- data.frame(
       p_good = rep(p_seq, 2),
-      期望收益 = c(big_exp, small_exp),
+      期望指标 = c(big_exp, small_exp),
       方案 = rep(c("大批量", "小批量"), each = length(p_seq))
     )
     
-    ggplot(df, aes(x = p_good, y = 期望收益, color = 方案)) +
+    y_label <- if (res$is_benefit) "期望收益（万元）" else "期望成本（万元）"
+    
+    ggplot(df, aes(x = p_good, y = 期望指标, color = 方案)) +
       geom_line(linewidth = 1.2) +
       geom_point(aes(x = res$prior[1], y = res$prior_expected["大批量"]),
                  color = "#1b9e77", size = 3) +
       geom_point(aes(x = res$prior[1], y = res$prior_expected["小批量"]),
                  color = "#d95f02", size = 3) +
       geom_hline(yintercept = 0, linetype = "dashed", color = "gray") +
-      labs(x = "销路好先验概率", y = "期望收益（万元）") +
+      labs(x = "销路好先验概率", y = y_label) +
       theme_minimal(base_size = 14) +
       scale_color_manual(values = c("大批量" = "#1b9e77", "小批量" = "#d95f02"))
   })

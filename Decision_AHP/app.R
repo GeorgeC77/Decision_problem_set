@@ -153,8 +153,10 @@ ui <- fluidPage(
       tags$hr(),
       h4("使用说明"),
       tags$ul(
+        tags$li("本网页权重采用几何平均近似法（即判断矩阵各行几何平均值归一化）计算。"),
         tags$li("左侧输入判断矩阵；上三角数值改变后，下三角会自动补为倒数。"),
-        tags$li("CR < 0.1 时认为判断矩阵具有满意一致性。"),
+        tags$li("一致性比率 CR < 0.1 时认为判断矩阵具有满意一致性；CR ≥ 0.1 时结果仅供参考，建议调整判断矩阵。"),
+        tags$li("1–9 标度含义：1 表示同等重要，3 表示稍重要，5 表示明显重要，7 表示强烈重要，9 表示极端重要；2、4、6、8 为相邻标度中间值。"),
         tags$li("教材中 C2 不含 a1、C3 不含 a5，网页默认用中性值占位，教师可引导学生讨论其合理性。")
       )
     ),
@@ -175,7 +177,7 @@ ui <- fluidPage(
             h4("核心教学目标"),
             tags$ul(
               tags$li("理解 1-9 标度与判断矩阵的构造；"),
-              tags$li("掌握几何平均法或特征向量法求权重；"),
+              tags$li("掌握几何平均近似法求权重；"),
               tags$li("掌握一致性检验：CI、RI、CR 的计算与判断；"),
               tags$li("掌握层次总排序及其一致性检验。")
             )
@@ -204,6 +206,8 @@ ui <- fluidPage(
         
         tabPanel(
           "计算结果",
+          br(),
+          uiOutput("cr_warning"),
           br(),
           uiOutput("cr_cards"),
           br(),
@@ -372,6 +376,22 @@ server <- function(input, output, session) {
     rv$total_cr <- list(ci = total_ci, ri = total_ri, cr = total_cr)
   })
   
+  output$cr_warning <- renderUI({
+    req(rv$criteria_res)
+    cr <- rv$criteria_res$cr
+    if (is.na(cr) || cr >= 0.1) {
+      div(
+        class = "warning-box",
+        HTML(sprintf(
+          "<b>一致性检验未通过：</b>准则层判断矩阵的 CR = %.4f ≥ 0.10。建议返回检查判断矩阵的逻辑一致性，调整后再重新计算。未通过一致性检验时，AHP 排序结果仅供参考。",
+          cr
+        ))
+      )
+    } else {
+      div(class = "info-box", p("准则层一致性检验通过（CR < 0.10），结果可信。"))
+    }
+  })
+  
   output$cr_cards <- renderUI({
     req(rv$criteria_res)
     cr <- rv$criteria_res$cr
@@ -430,11 +450,19 @@ server <- function(input, output, session) {
   
   output$total_rank_table <- renderDT({
     req(rv$total_rank)
-    datatable(
+    # 若存在未通过一致性检验的方案矩阵，在表中附加标记
+    cr_warn <- sapply(rv$alt_res, function(x) {
+      !is.na(x$res$cr) && x$res$cr >= 0.1
+    })
+    any_warn <- any(cr_warn)
+    
+    dt <- datatable(
       rv$total_rank,
       rownames = FALSE,
-      options = list(dom = "t", paging = FALSE, ordering = FALSE)
+      options = list(dom = "t", paging = FALSE, ordering = FALSE),
+      caption = if (any_warn) "层次总排序（带 * 的准则判断矩阵未通过一致性检验，请检查）" else "层次总排序"
     )
+    dt
   })
   
   output$total_cr_box <- renderUI({
@@ -443,10 +471,11 @@ server <- function(input, output, session) {
     div(
       class = "formula-box",
       HTML(paste0(
-        "CI_total = ", round(rv$total_cr$ci, 4), "<br/>",
-        "RI_total = ", round(rv$total_cr$ri, 4), "<br/>",
+        "层次总排序公式：W_total = V · W_criteria，其中 V 的每一列为某准则下各方案局部权重，W_criteria 为准则层权重向量。<br/><br/>",
+        "CI_total = Σ w_k · CI_k = ", round(rv$total_cr$ci, 4), "<br/>",
+        "RI_total = Σ w_k · RI_k = ", round(rv$total_cr$ri, 4), "<br/>",
         "CR_total = CI_total / RI_total = ", round(rv$total_cr$cr, 4),
-        ifelse(pass, " < 0.1，通过总排序一致性检验。", " ≥ 0.1，未通过总排序一致性检验。")
+        ifelse(pass, " < 0.1，通过总排序一致性检验。", " ≥ 0.1，未通过总排序一致性检验，建议调整判断矩阵。")
       ))
     )
   })

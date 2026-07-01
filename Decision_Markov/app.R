@@ -29,10 +29,14 @@ step_prob <- function(P, S0, n) {
 # 稳定状态概率（解 S*P = S, sum(S)=1）
 steady_state <- function(P) {
   n <- nrow(P)
+  if (n != ncol(P)) return(rep(NA_real_, n))
   A <- t(P) - diag(n)
   A <- rbind(A, rep(1, n))
   b <- c(rep(0, n), 1)
-  S <- solve(t(A) %*% A, t(A) %*% b)
+  # 使用 QR 分解求解最小二乘问题，提高数值稳健性
+  S <- qr.solve(A, b)
+  S <- pmax(S, 0)
+  S <- S / sum(S)
   as.vector(S)
 }
 
@@ -88,6 +92,7 @@ names(S0_default) <- states
 # 自定义矩阵输入 UI 组件
 matrixInput <- function(inputId, label, mat) {
   tagList(
+    p(class = "small-note", "行=当前状态，列=下一状态。每行概率之和必须等于 1。"),
     lapply(seq_len(nrow(mat)), function(i) {
       fluidRow(
         lapply(seq_len(ncol(mat)), function(j) {
@@ -132,6 +137,11 @@ ui <- fluidPage(
       }
       .metric-title { color: #5b7083; font-size: 13px; margin-bottom: 8px; }
       .metric-value { font-size: 24px; font-weight: 700; color: #1f3b5b; }
+      .warning-box {
+        background: #fff3cd; border: 1px solid #f0d98c; border-radius: 8px;
+        padding: 12px 16px; margin-bottom: 14px; color: #7a4b00;
+      }
+      .small-note { color: #667085; font-size: 13px; }
     "))
   ),
   
@@ -185,10 +195,19 @@ ui <- fluidPage(
                        tags$li("为序贯/长期经营决策提供定量依据。")
                      ),
                      h4("教材题目"),
-                     p("某企业商品的销售状态只分为“畅销”和“滞销”两种。每个时期的利润与上一时期及本时期所处状态有关（见利润矩阵）。已知目前的前一时期为“滞销”。现有策略 A、B 两种状态转移矩阵。问：为使利润最大化，在不同经营期限下应采取哪种策略？")
+                     p("某企业商品的销售状态只分为“畅销”和“滞销”两种。每个时期的利润与上一时期及本时期所处状态有关（见利润矩阵）。已知目前的前一时期为“滞销”。现有策略 A、B 两种状态转移矩阵。问：为使利润最大化，在不同经营期限下应采取哪种策略？"),
+                     tags$hr(),
+                     h4("马尔可夫链基本约定"),
+                     tags$ul(
+                       tags$li("无后效性（马尔可夫性）：下一时期状态只依赖当前状态，与更早历史无关；"),
+                       tags$li("行随机矩阵：转移矩阵 P 的每一行表示“当前状态 → 下一状态”的概率分布，因此每行之和为 1；"),
+                       tags$li("稳态存在条件：若马尔可夫链不可约且非周期，则存在唯一稳态分布 π，满足 π = πP；"),
+                       tags$li("稳态结论仅适用于长期经营；若经营期限较短，应结合 n 步状态概率演化综合判断。")
+                     )
                  )
         ),
         tabPanel("计算结果", br(),
+                 uiOutput("validation_msg"),
                  fluidRow(
                    column(6, uiOutput("metric_A")),
                    column(6, uiOutput("metric_B"))
@@ -244,13 +263,41 @@ server <- function(input, output, session) {
     s
   })
   
+  validate_matrix <- function(P, name) {
+    msg <- NULL
+    if (any(P < 0)) msg <- paste0(name, " 存在负概率，已自动截断为 0。")
+    P <- pmax(P, 0)
+    row_sums <- rowSums(P)
+    if (any(row_sums == 0)) {
+      return(list(valid = FALSE, msg = paste0(name, " 某行概率之和为 0，无法作为转移矩阵。"), P = P))
+    }
+    if (any(abs(row_sums - 1) > 1e-06)) {
+      P <- P / row_sums
+      msg <- paste0(name, " 每行概率之和未严格为 1，已自动归一化。")
+    }
+    list(valid = TRUE, msg = msg, P = P)
+  }
+  
   results <- eventReactive(input$calculate, {
     S0v <- S0()
     n <- input$n_steps
     
+    val_A <- validate_matrix(PA_mat(), "策略 A 转移矩阵")
+    val_B <- validate_matrix(PB_mat(), "策略 B 转移矩阵")
+    
+    if (!val_A$valid || !val_B$valid) {
+      showNotification(paste(val_A$msg, val_B$msg, sep = " "), type = "error")
+      return(NULL)
+    }
+    if (!is.null(val_A$msg)) showNotification(val_A$msg, type = "warning")
+    if (!is.null(val_B$msg)) showNotification(val_B$msg, type = "warning")
+    
+    PA <- val_A$P
+    PB <- val_B$P
+    
     # 各时期状态概率
-    prob_A <- t(sapply(0:n, function(k) step_prob(PA_mat(), S0v, k)))
-    prob_B <- t(sapply(0:n, function(k) step_prob(PB_mat(), S0v, k)))
+    prob_A <- t(sapply(0:n, function(k) step_prob(PA, S0v, k)))
+    prob_B <- t(sapply(0:n, function(k) step_prob(PB, S0v, k)))
     colnames(prob_A) <- states
     colnames(prob_B) <- states
     prob_A <- as.data.frame(prob_A)
@@ -261,12 +308,12 @@ server <- function(input, output, session) {
     prob_B$时期 <- 0:n
     
     # 稳态
-    ss_A <- steady_state(PA_mat())
-    ss_B <- steady_state(PB_mat())
+    ss_A <- steady_state(PA)
+    ss_B <- steady_state(PB)
     
     # 稳态年期望利润（简化）
-    exp_A <- expected_profit_2yr(PA_mat(), R_mat(), ss_A)
-    exp_B <- expected_profit_2yr(PB_mat(), R_mat(), ss_B)
+    exp_A <- expected_profit_2yr(PA, R_mat(), ss_A)
+    exp_B <- expected_profit_2yr(PB, R_mat(), ss_B)
     
     list(prob_A = prob_A, prob_B = prob_B, ss_A = ss_A, ss_B = ss_B,
          exp_A = exp_A, exp_B = exp_B)
@@ -301,12 +348,21 @@ server <- function(input, output, session) {
       formatRound(columns = states, digits = 4)
   })
   
+  output$validation_msg <- renderUI({
+    req(results())
+    div(class = "info-box",
+        p(strong("转移矩阵已校验。")),
+        p("当前采用行随机矩阵约定：π_{t+1} = π_t · P。每行概率之和已校验为 1。"),
+        p("稳态结论成立的前提是马尔可夫链不可约且非周期；若矩阵不满足该条件，稳态可能不唯一或不存在。")
+    )
+  })
+  
   output$recommend <- renderUI({
     req(results())
     better <- if (results()$exp_A >= results()$exp_B) "A" else "B"
     div(class = "info-box",
         h4("推荐结果"),
-        p(sprintf("从稳态期望利润看，策略 %s 更优（%.2f vs %.2f 万元）。",
+        p(sprintf("若两策略对应的马尔可夫链均收敛到唯一稳态，则从稳态期望年利润看，策略 %s 更优（%.2f vs %.2f 万元）。",
                   better, max(results()$exp_A, results()$exp_B), min(results()$exp_A, results()$exp_B))),
         p("若经营期限较短，可结合“图形分析”标签页查看各时期畅销概率变化，综合判断。")
     )
